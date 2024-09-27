@@ -1,0 +1,6 @@
+pygame
+numpy
+matplotlib
+gymnasium
+wandb
+tyro
