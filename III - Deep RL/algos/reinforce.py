@@ -118,7 +118,9 @@ def rollout():
 
 def update(obs, actions, rtg):
     """
-    batch_logprobs, batch_returns : (num_steps,)
+    obs: (B, obs_dim)
+    actions: (B, action_dim)
+    rtg: (B,)
     """
 
     _, logp = agent.get_action(obs, action=actions)
