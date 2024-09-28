@@ -135,6 +135,7 @@ if __name__ == "__main__":
     
     if config.log_wandb:
         wandb.init(project="reinforce", config={
+            "algo": "reinforce",
             "env_id": config.env_id,
             "total_timesteps": config.total_timesteps,
             "step_per_rollout": config.num_steps,
