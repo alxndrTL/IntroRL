@@ -90,7 +90,7 @@ def rollout():
             action, _ = agent.get_action(observation)
 
         # env step
-        observation, reward, terminated, truncated, info = env.step(action.cpu().numpy())
+        observation, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
         done = np.logical_or(terminated, truncated)
         observation, done = torch.Tensor(observation).to(config.device), torch.Tensor(done).to(config.device)
 
