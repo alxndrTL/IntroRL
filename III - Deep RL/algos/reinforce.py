@@ -3,7 +3,6 @@ only works with 1 env
 """
 
 from dataclasses import dataclass
-import tyro
 import wandb
 import numpy as np
 
@@ -24,6 +23,9 @@ class Config:
 
     pi_lr: float = 1e-2
     """ learning rate of the policy """
+
+    gamma: float = 0.99
+    """ discount factor """
 
     log_wandb: bool = False
 
@@ -97,30 +99,28 @@ def rollout():
         batch_actions[t] = action
         batch_rewards[t] = torch.tensor(reward).to(config.device)
 
-    batch_returns = torch.zeros(config.num_steps)
+    batch_rtg = torch.zeros(config.num_steps)
     returns = [] # for logging, one per traj
-    curr_ret = 0
-    last_ep_idx = config.num_steps-1
+    rtg = 0
     for t in reversed(range(config.num_steps)):
-        curr_ret += batch_rewards[t]
+        rtg += batch_rewards[t]
+        batch_rtg[t] = rtg
+        rtg *= config.gamma
 
         if batch_dones[t]:
-            batch_returns[t:last_ep_idx+1] = curr_ret
-            returns.append(curr_ret)
+            returns.append(rtg)
+            rtg = 0
 
-            curr_ret = 0
-            last_ep_idx = t-1
+    return batch_obs, batch_actions, batch_rtg, returns
 
-    return batch_obs, batch_actions, batch_returns, returns
-
-def update(obs, actions, returns):
+def update(obs, actions, rtg):
     """
     batch_logprobs, batch_returns : (num_steps,)
     """
 
     _, logp = agent.get_action(obs, action=actions)
     
-    loss_pi = -torch.mean(logp * returns) # technically not correct, the mean is over the traj only, not timesteps
+    loss_pi = -torch.mean(logp * rtg) # technically not correct, the mean is over the traj only, not timesteps
     loss_pi.backward()
     optim.step()
     optim.zero_grad()
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), log_wandb=True, device="cpu")
     
     if config.log_wandb:
-        wandb.init(project="vpg", config={
+        wandb.init(project="reinforce", config={
             "env_id": config.env_id,
             "total_timesteps": config.total_timesteps,
             "step_per_rollout": config.num_steps,
@@ -140,12 +140,12 @@ if __name__ == "__main__":
 
     agent = Agent(env)
     optim = torch.optim.Adam(agent.parameters(), lr=config.pi_lr)
-
+    
     total_steps = config.total_timesteps // config.num_steps
 
     for step in range(total_steps):
-        obs, actions, returns, rets = rollout()
-        update(obs, actions, returns)
+        obs, actions, rtg, rets = rollout()
+        update(obs, actions, rtg)
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step:0{num_digits}d}"
