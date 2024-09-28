@@ -100,16 +100,19 @@ def rollout():
         batch_rewards[t] = torch.tensor(reward).to(config.device)
 
     batch_rtg = torch.zeros(config.num_steps)
-    returns = [] # for logging, one per traj
     rtg = 0
+    returns = [] # for logging, one per traj
+    ret = 0
     for t in reversed(range(config.num_steps)):
         rtg += batch_rewards[t]
+        ret += batch_rewards[t]
         batch_rtg[t] = rtg
         rtg *= config.gamma
 
         if batch_dones[t]:
-            returns.append(rtg)
+            returns.append(ret)
             rtg = 0
+            ret = 0
 
     return batch_obs, batch_actions, batch_rtg, returns
 
@@ -126,14 +129,15 @@ def update(obs, actions, rtg):
     optim.zero_grad()
 
 if __name__ == "__main__":
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), log_wandb=True, device="cpu")
+    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), gamma=0.99, log_wandb=True, device="cpu")
     
     if config.log_wandb:
         wandb.init(project="reinforce", config={
             "env_id": config.env_id,
             "total_timesteps": config.total_timesteps,
             "step_per_rollout": config.num_steps,
-            "pi_lr": config.pi_lr
+            "pi_lr": config.pi_lr,
+            "gamma": config.gamma
         })
 
     env = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
