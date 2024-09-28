@@ -123,7 +123,7 @@ def update(obs, actions, rtg):
 
     _, logp = agent.get_action(obs, action=actions)
     
-    loss_pi = -torch.mean(logp * rtg) # technically not correct, the mean is over the traj only, not timesteps
+    loss_pi = -torch.mean(logp * rtg)
     loss_pi.backward()
     optim.step()
     optim.zero_grad()
