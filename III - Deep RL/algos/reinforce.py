@@ -1,4 +1,6 @@
 """
+REINFORCE algorithm
+
 only works with 1 env
 """
 
