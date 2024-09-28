@@ -1,4 +1,6 @@
 """
+Simple Policy Gradient algorithm
+
 only works with 1 env
 """
 
@@ -131,8 +133,8 @@ if __name__ == "__main__":
     config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), log_wandb=True, device="cpu")
     
     if config.log_wandb:
-        wandb.init(project="vpg", config={
-            "algo": "vpg",
+        wandb.init(project="spg", config={
+            "algo": "spg",
             "env_id": config.env_id,
             "total_timesteps": config.total_timesteps,
             "step_per_rollout": config.num_steps,
