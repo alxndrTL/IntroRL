@@ -147,7 +147,7 @@ def rollout():
         next_value = b_values[t]
         next_nonterminal = 1.0 - b_dones[t]
 
-    b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q beging a mix of n-step returns)
+    b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
     return b_observations, b_actions, b_adv, b_returns, returns
 
