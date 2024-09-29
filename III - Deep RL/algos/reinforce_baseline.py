@@ -84,51 +84,51 @@ def rollout():
     collect num_steps timesteps of experience in the environment
     """
 
-    batch_obs = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
-    batch_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
-    batch_rewards = torch.zeros(config.num_steps).to(config.device)
-    batch_dones = torch.zeros(config.num_steps).to(config.device)
+    b_observations = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
+    b_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
+    b_rewards = torch.zeros(config.num_steps).to(config.device)
+    b_dones = torch.zeros(config.num_steps).to(config.device)
 
     # observation : (1, obs_dim)
     # action : (1, action_dim)
     # reward : (1,)
     # done : (1,)
 
-    observation, _ = env.reset()
-    observation = torch.Tensor(observation).to(config.device)
-    done = torch.ones(1)
+    next_obs, _ = env.reset()
+    next_obs = torch.Tensor(next_obs).to(config.device)
+    next_done = torch.ones(1)
 
     for t in range(config.num_steps):
-        batch_obs[t] = observation
-        batch_dones[t] = done
+        b_observations[t] = next_obs
+        b_dones[t] = next_done
 
         with torch.no_grad():
-            action, _ = agent.get_action(observation)
+            action, _ = agent.get_action(next_obs)
 
         # env step
-        observation, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
-        done = np.logical_or(terminated, truncated)
-        observation, done = torch.Tensor(observation).to(config.device), torch.Tensor(done).to(config.device)
+        next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
+        next_done = np.logical_or(terminated, truncated)
+        next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
-        batch_actions[t] = action
-        batch_rewards[t] = torch.tensor(reward).to(config.device)
+        b_actions[t] = action
+        b_rewards[t] = torch.tensor(reward).to(config.device)
 
-    batch_rtg = torch.zeros(config.num_steps)
+    b_rtg = torch.zeros(config.num_steps)
     rtg = 0
     returns = [] # for logging, one per traj
     ret = 0
     for t in reversed(range(config.num_steps)):
-        rtg += batch_rewards[t]
-        ret += batch_rewards[t]
-        batch_rtg[t] = rtg
+        rtg += b_rewards[t]
+        ret += b_rewards[t]
+        b_rtg[t] = rtg
         rtg *= config.gamma
 
-        if batch_dones[t]:
+        if b_dones[t]:
             returns.append(ret)
             rtg = 0
             ret = 0
 
-    return batch_obs, batch_actions, batch_rtg, returns
+    return b_observations, b_actions, b_rtg, returns
 
 def update(obs, actions, rtg):
     """

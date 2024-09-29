@@ -70,50 +70,50 @@ def rollout():
     collect num_steps timesteps of experience in the environment
     """
 
-    batch_obs = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
-    batch_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
-    batch_rewards = torch.zeros(config.num_steps).to(config.device)
-    batch_dones = torch.zeros(config.num_steps).to(config.device)
+    b_observations = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
+    b_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
+    b_rewards = torch.zeros(config.num_steps).to(config.device)
+    b_dones = torch.zeros(config.num_steps).to(config.device)
 
     # observation : (1, obs_dim)
     # action : (1, action_dim)
     # reward : (1,)
     # done : (1,)
 
-    observation, _ = env.reset()
-    observation = torch.Tensor(observation).to(config.device)
+    next_obs, _ = env.reset()
+    next_obs = torch.Tensor(next_obs).to(config.device)
     done = torch.ones(1)
 
     for t in range(config.num_steps):
-        batch_obs[t] = observation
-        batch_dones[t] = done
+        b_observations[t] = next_obs
+        b_dones[t] = done
 
         with torch.no_grad():
-            action, _ = agent.get_action(observation)
+            action, _ = agent.get_action(next_obs)
 
         # env step
-        observation, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
-        done = np.logical_or(terminated, truncated)
-        observation, done = torch.Tensor(observation).to(config.device), torch.Tensor(done).to(config.device)
+        next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
+        next_done = np.logical_or(terminated, truncated)
+        next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
-        batch_actions[t] = action
-        batch_rewards[t] = torch.tensor(reward).to(config.device)
+        b_actions[t] = action
+        b_rewards[t] = torch.tensor(reward).to(config.device)
 
-    batch_returns = torch.zeros(config.num_steps)
-    returns = [] # for logging, one per traj
+    b_returns = torch.zeros(config.num_steps)
+    ep_returns = [] # for logging, one per traj
     curr_ret = 0
     last_ep_idx = config.num_steps-1
     for t in reversed(range(config.num_steps)):
-        curr_ret += batch_rewards[t]
+        curr_ret += b_rewards[t]
 
-        if batch_dones[t]:
-            batch_returns[t:last_ep_idx+1] = curr_ret
-            returns.append(curr_ret)
+        if b_dones[t]:
+            b_returns[t:last_ep_idx+1] = curr_ret
+            ep_returns.append(curr_ret)
 
             curr_ret = 0
             last_ep_idx = t-1
 
-    return batch_obs, batch_actions, batch_returns, returns
+    return b_observations, b_actions, b_returns, ep_returns
 
 def update(obs, actions, returns):
     """
@@ -149,12 +149,12 @@ if __name__ == "__main__":
     total_steps = config.total_timesteps // config.num_steps
 
     for step in range(total_steps):
-        obs, actions, returns, rets = rollout()
+        obs, actions, returns, ep_rets = rollout()
         update(obs, actions, returns)
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(rets):.2f}")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}")
 
         if config.log_wandb:
-            wandb.log({"returns": np.mean(rets)}, step=(step+1)*config.num_steps)
+            wandb.log({"returns": np.mean(ep_rets)}, step=(step+1)*config.num_steps)
