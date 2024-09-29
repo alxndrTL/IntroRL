@@ -156,7 +156,7 @@ def update(obs, actions, adv, rets):
     obs: (B, obs_dim)
     actions: (B, action_dim)
     adv: (B,)
-    q: (B,)
+    rets: (B,)
     """
 
     _, logp, values = agent.get_action_value(obs, action=actions)
