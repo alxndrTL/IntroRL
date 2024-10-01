@@ -52,7 +52,7 @@ class Agent(nn.Module):
         obs: (B, obs_dim)
         action: (B, action_dim)
         > action: (B, action_dim)
-        > logprobs: (B)
+        > logp: (B)
         """
 
         logits = self.policy(obs)
