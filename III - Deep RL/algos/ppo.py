@@ -31,8 +31,12 @@ class Config:
 
     clip_ratio: float = 0.2
     """ clipping ratio between old and new policy probs """
+    clip_vf: bool = False
+    """ whether or not to apply a clipping strategy on the vf loss (done with pi_loss) """
     vf_coef: float = 0.5
     """ coefficient of the value function in the total loss """
+    ent_coef: float = 0.
+    """ coefficient of the policy entropy in the total loss """
 
     lr: float = 3e-4
     """ learning rate (policy and value function) """
@@ -92,7 +96,7 @@ class Agent(nn.Module):
             logp = probs.log_prob(action)
             action = None
         
-        return action, logp, self.value_func(obs)
+        return action, logp, probs.entropy(), self.value_func(obs)
 
 def rollout():
     """
@@ -120,7 +124,7 @@ def rollout():
         b_dones[t] = next_done
 
         with torch.no_grad():
-            action, logp, value = agent.get_action_value(next_obs)
+            action, logp, _, value = agent.get_action_value(next_obs)
 
         # env step (if done, next_obs is the obs of the new episode)
         next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
@@ -163,9 +167,9 @@ def rollout():
 
     b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
-    return b_observations, b_actions, b_logprobs, b_adv, b_returns, returns
+    return b_observations, b_actions, b_logprobs, b_adv, b_values, b_returns, returns
 
-def update(obs, actions, old_logprobs, adv, rets):
+def update(obs, actions, old_logprobs, adv, old_values, rets):
     """
     obs: (B, obs_dim)
     actions: (B, action_dim)
@@ -184,19 +188,33 @@ def update(obs, actions, old_logprobs, adv, rets):
             b_old_logprobs = old_logprobs[idx_batch]
             b_rets = rets[idx_batch]
             b_adv = adv[idx_batch]
+            b_old_values = old_values[idx_batch]
         
-            _, b_logp, b_values = agent.get_action_value(b_obs, action=b_actions)
+            _, b_logp, b_entropy, b_values = agent.get_action_value(b_obs, action=b_actions)
+
+            # todo : norm adv?
 
             # policy loss
             ratio = torch.exp(b_logp - b_old_logprobs)
             clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
             loss_pi = -torch.mean(torch.min(ratio * b_adv, clip_adv))
             
-            # value
-            loss_vf = torch.mean((b_rets - b_values)**2)
+            # value loss (0.5 is to ensure same vf_coef as with other implementations)
+            if config.clip_vf:
+                loss_vf_unclipped = (b_rets - b_values)**2
+
+                b_values_clipped = b_old_values + torch.clamp(b_values - b_old_values, -config.clip_ratio, +config.clip_ratio)
+                loss_vf_clipped = (b_rets - b_values_clipped)**2
+
+                loss_vf = 0.5 * torch.mean(torch.max(loss_vf_unclipped, loss_vf_clipped))
+            else:
+                loss_vf = 0.5 * torch.mean((b_rets - b_values)**2)
+
+            # entropy loss
+            loss_ent = b_entropy.mean()
 
             # total update
-            loss = loss_pi + config.vf_coef * loss_vf
+            loss = loss_pi + config.vf_coef * loss_vf + config.ent_coef * loss_ent
             loss.backward()
             _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
             optim.step()
@@ -235,11 +253,11 @@ if __name__ == "__main__":
     total_steps = config.total_timesteps // config.num_steps
 
     for step in range(total_steps):
-        obs, actions, old_logprobs, adv, rets, ep_rets = rollout()
-        explained_var = update(obs, actions, old_logprobs, adv, rets)
+        obs, actions, old_logprobs, adv, old_values, rets, ep_rets = rollout()
+        explained_var = update(obs, actions, old_logprobs, adv, old_values, rets)
 
         num_digits = len(str(total_steps))
-        formatted_iter = f"{step:0{num_digits}d}"
+        formatted_iter = f"{step+1:0{num_digits}d}"
         print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}. Explained var of returns pred: {explained_var:.2f}")
 
         if config.log_wandb:
