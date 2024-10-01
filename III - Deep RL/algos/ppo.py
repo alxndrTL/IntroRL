@@ -5,6 +5,14 @@ with Generalized Advantage Estimation (GAE)
 only works with 1 env
 """
 
+# pistes d'améliorations:
+# faire des ss-fonctions ? (gae, compute loss...)
+# comparer les perfs de cet algo avec PPO SpinningUP et PPO (C)LeanRL sur CartPole
+# multi envs
+# script de test d'un agent entraîné (pas forcément en rendering, paramètre)
+# mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
+# lire papier implementations details of ppo
+
 from dataclasses import dataclass
 import wandb
 import numpy as np
@@ -82,12 +90,12 @@ class Agent(nn.Module):
         """
         Two modes:
         -rollout mode (action=None): an action is sampled (B=num_envs)
-        -training mode (action!=None): only logp(a|o) is given (B=num_steps*num_envs)
+        -training mode (action!=None): logp(a|o) and entropy is given (B=num_steps*num_envs)
 
         obs: (B, obs_dim)
         action: (B, action_dim)
         > action: (B, action_dim)
-        > logprobs: (B)
+        > logp: (B)
         """
 
         logits = self.policy(obs)
@@ -96,11 +104,13 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
             logp = probs.log_prob(action)
+            ent = None
         else:
             logp = probs.log_prob(action)
+            ent = probs.entropy()
             action = None
         
-        return action, logp, probs.entropy(), self.value_func(obs)
+        return action, logp, ent, self.value_func(obs)
 
 def rollout():
     """
@@ -109,7 +119,7 @@ def rollout():
 
     b_observations = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
     b_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
-    b_logprobs = torch.zeros((config.num_steps,)).to(config.device)
+    b_logp = torch.zeros((config.num_steps,)).to(config.device)
     b_rewards = torch.zeros(config.num_steps).to(config.device)
     b_dones = torch.zeros(config.num_steps).to(config.device)
     b_values = torch.zeros(config.num_steps).to(config.device)
@@ -136,7 +146,7 @@ def rollout():
         next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
         b_actions[t] = action
-        b_logprobs[t] = logp
+        b_logp[t] = logp
         b_rewards[t] = torch.tensor(reward).to(config.device)
         b_values[t] = value
 
@@ -171,14 +181,19 @@ def rollout():
 
     b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
-    return b_observations, b_actions, b_logprobs, b_adv, b_values, b_returns, returns
+    return b_observations, b_actions, b_logp, b_adv, b_values, b_returns, returns
 
-def update(obs, actions, old_logprobs, adv, old_values, rets):
+def update(obs, actions, old_logp, adv, old_values, rets):
     """
     obs: (B, obs_dim)
     actions: (B, action_dim)
+    old_logp: (B,)
     adv: (B,)
+    old_values: (B,)
     rets: (B,)
+
+    all these are supposed to be collected in a rollout phase
+    here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
     """
 
     for _ in range(config.num_epochs):
@@ -189,7 +204,7 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
 
             b_obs = obs[idx_batch]
             b_actions = actions[idx_batch]
-            b_old_logprobs = old_logprobs[idx_batch]
+            b_old_logp = old_logp[idx_batch]
             b_rets = rets[idx_batch]
             b_adv = adv[idx_batch]
             b_old_values = old_values[idx_batch]
@@ -200,7 +215,7 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
                 b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
             # policy loss
-            log_ratio = b_logp - b_old_logprobs
+            log_ratio = b_logp - b_old_logp
             ratio = torch.exp(log_ratio)
             clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
             loss_pi = -torch.mean(torch.min(ratio * b_adv, clip_adv))
@@ -233,8 +248,6 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
 
-    return explained_var
-
 if __name__ == "__main__":
     # 2_000/2^-5, 500/2^-6
     config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=2_000,
@@ -261,16 +274,12 @@ if __name__ == "__main__":
     total_steps = config.total_timesteps // config.num_steps
 
     for step in range(total_steps):
-        obs, actions, old_logprobs, adv, old_values, rets, ep_rets = rollout()
-        explained_var = update(obs, actions, old_logprobs, adv, old_values, rets)
+        obs, actions, old_logp, adv, old_values, rets, ep_rets = rollout()
+        update(obs, actions, old_logp, adv, old_values, rets)
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}. Explained var of returns pred: {explained_var:.2f}")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}.")
 
         if config.log_wandb:
             wandb.log({"returns": np.mean(ep_rets)}, step=(step+1)*config.num_steps)
-
-#todo : naming "_old" ??
-#todo : logp ou logprobs, décider
-#todo : shapes en comments
