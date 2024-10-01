@@ -233,11 +233,6 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
 
-    # todo : fix
-    y_pred, y_true = b_values.cpu().detach().numpy(), b_rets.cpu().numpy() # only on last batch
-    var_y = np.var(y_true)
-    explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
     return explained_var
 
 if __name__ == "__main__":
@@ -261,7 +256,7 @@ if __name__ == "__main__":
     env = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
 
     agent = Agent(env)
-    optim = torch.optim.Adam(agent.parameters(), lr=config.lr)
+    optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)
     
     total_steps = config.total_timesteps // config.num_steps
 
