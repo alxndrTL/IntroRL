@@ -29,6 +29,9 @@ class Config:
     batch_size: int = 64
     """ batch size of each update """
 
+    normalize_adv: bool = False
+    """ whether or not to normalize the advantage in the policy update """
+
     clip_ratio: float = 0.2
     """ clipping ratio between old and new policy probs """
     clip_vf: bool = False
@@ -193,7 +196,8 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
         
             _, b_logp, b_entropy, b_values = agent.get_action_value(b_obs, action=b_actions)
 
-            # todo : norm adv?
+            if config.normalize_adv:
+                b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
             # policy loss
             log_ratio = b_logp - b_old_logprobs
@@ -238,8 +242,8 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
 
 if __name__ == "__main__":
     # 2_000/2^-5, 500/2^-6
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500,
-                    lr=2**(-6), vf_coef=0.5, gae_gamma=0.99, gae_lambda=0.97,
+    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=2_000,
+                    lr=3e-4, vf_coef=0.5, gae_gamma=0.99, gae_lambda=0.95,
                     log_wandb=False, device="cpu")
     
     if config.log_wandb:
