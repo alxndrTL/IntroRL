@@ -6,7 +6,6 @@ only works with 1 env
 """
 
 # pistes d'améliorations:
-# faire des ss-fonctions ? (gae, compute loss...)
 # comparer les perfs de cet algo avec PPO SpinningUP et PPO (C)LeanRL sur CartPole
 # multi envs
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
