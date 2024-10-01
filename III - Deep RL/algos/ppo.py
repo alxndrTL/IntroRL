@@ -41,7 +41,8 @@ class Config:
     lr: float = 3e-4
     """ learning rate (policy and value function) """
 
-    
+    max_kl: float = None
+    """ threshold for the KL div between old and new policy. Above this, the current update stops. """
 
     gae_gamma: float = 0.99
     """ gamma for advantage computation (technically, discount factor is 1) """
@@ -195,9 +196,14 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
             # todo : norm adv?
 
             # policy loss
-            ratio = torch.exp(b_logp - b_old_logprobs)
+            log_ratio = b_logp - b_old_logprobs
+            ratio = torch.exp(log_ratio)
             clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
             loss_pi = -torch.mean(torch.min(ratio * b_adv, clip_adv))
+
+            # KL computations (http://joschu.net/blog/kl-approx.html)
+            with torch.no_grad():
+                approx_kl = torch.mean(((ratio - 1) - log_ratio))
             
             # value loss (0.5 is to ensure same vf_coef as with other implementations)
             if config.clip_vf:
@@ -219,6 +225,9 @@ def update(obs, actions, old_logprobs, adv, old_values, rets):
             _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
             optim.step()
             optim.zero_grad()
+        
+        if config.max_kl is not None and approx_kl > config.max_kl:
+            break
 
     # todo : fix
     y_pred, y_true = b_values.cpu().detach().numpy(), b_rets.cpu().numpy() # only on last batch
