@@ -7,17 +7,14 @@ only works with 1 env
 
 # TODO
 # pistes d'améliorations:
-# comparer les perfs de cet algo avec PPO SpinningUP et PPO (C)LeanRL sur CartPole
 # multi envs?
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
 # mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # lire papier implementations details of ppo + intégrer notes lec6
-# leanrl version
-# explain var (ie accuracy of VF prediction)
+# leanrl version (torch compile & cuda graphs)
 # reward centering
 # anneal LR
 # reprendre wandb typo de leanRL
-# name "critic" for VF
 # give seed when reseting obs (for the first time only)
 # change clip_vf to clip_vloss ?
 
@@ -36,7 +33,7 @@ from torch.distributions.categorical import Categorical
 class Config:
     env_id: str = "CartPole-v1"
 
-    seed: int = 0
+    seed: int = 2
 
     # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
     total_timesteps: int = 100_000
@@ -75,7 +72,7 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    log_wandb: bool = False
+    log_wandb: bool = True
 
     device: str = "cpu"
 
@@ -89,14 +86,14 @@ class Agent(nn.Module):
             nn.Linear(32, envs.single_action_space.n)
         )
 
-        self.value_func = nn.Sequential(
+        self.critic = nn.Sequential(
             nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32),
             nn.Tanh(),
             nn.Linear(32, 1)
         )
 
     def get_value(self, obs):
-        return self.value_func(obs)
+        return self.critic(obs)
     
     def get_action_value(self, obs, action=None):
         """
@@ -122,7 +119,7 @@ class Agent(nn.Module):
             ent = probs.entropy()
             action = None
         
-        return action, logp, ent, self.value_func(obs)
+        return action, logp, ent, self.critic(obs)
 
 def rollout():
     """

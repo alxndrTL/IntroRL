@@ -65,7 +65,7 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-    log_wandb: bool = False
+    log_wandb: bool = True
 
     # to be filled in runtime
     batch_size: int = 0
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}"
 
-    args.seed = 0
+    args.seed = 2
 
     if args.log_wandb:
         wandb.init(project="ppo", config={

@@ -49,14 +49,14 @@ class Agent(nn.Module):
             nn.Linear(32, env.single_action_space.n)
         )
 
-        self.value_func = nn.Sequential(
+        self.critic = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 32),
             nn.Tanh(),
             nn.Linear(32, 1)
         )
 
     def get_value(self, obs):
-        return self.value_func(obs)
+        return self.critic(obs)
     
     def get_action_value(self, obs, action=None):
         """
@@ -80,7 +80,7 @@ class Agent(nn.Module):
             logp = probs.log_prob(action)
             action = None
         
-        return action, logp, self.value_func(obs)
+        return action, logp, self.critic(obs)
 
 def rollout():
     """
