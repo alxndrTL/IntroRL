@@ -7,10 +7,11 @@ only works with 1 env
 
 # pistes d'améliorations:
 # comparer les perfs de cet algo avec PPO SpinningUP et PPO (C)LeanRL sur CartPole
-# multi envs
+# multi envs?
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
 # mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # lire papier implementations details of ppo + intégrer notes lec6
+# leanrl version
 
 from dataclasses import dataclass
 import wandb
