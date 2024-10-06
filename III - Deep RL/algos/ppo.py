@@ -16,7 +16,6 @@ only works with 1 env
 # anneal LR
 # reprendre wandb typo de leanRL
 # give seed when reseting obs (for the first time only)
-# change clip_vf to clip_vloss ?
 
 from dataclasses import dataclass
 import wandb
@@ -51,7 +50,7 @@ class Config:
 
     clip_ratio: float = 0.2
     """ clipping ratio between old and new policy probs """
-    clip_vf: bool = False
+    clip_loss_vf: bool = False
     """ whether or not to apply a clipping strategy on the vf loss (done with pi_loss) """
     vf_coef: float = 0.5
     """ coefficient of the value function in the total loss """
@@ -245,7 +244,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             
             # value loss (0.5 is to ensure same vf_coef as with other implementations)
             b_values = b_values.view(-1)
-            if config.clip_vf:
+            if config.clip_loss_vf:
                 loss_vf_unclipped = (b_rets - b_values)**2
 
                 b_values_clipped = b_old_values + torch.clamp(b_values - b_old_values, -config.clip_ratio, +config.clip_ratio)
