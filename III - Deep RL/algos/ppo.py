@@ -5,6 +5,7 @@ with Generalized Advantage Estimation (GAE)
 only works with 1 env
 """
 
+# TODO
 # pistes d'améliorations:
 # comparer les perfs de cet algo avec PPO SpinningUP et PPO (C)LeanRL sur CartPole
 # multi envs?
@@ -12,9 +13,17 @@ only works with 1 env
 # mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # lire papier implementations details of ppo + intégrer notes lec6
 # leanrl version
+# explain var (ie accuracy of VF prediction)
+# reward centering
+# anneal LR
+# reprendre wandb typo de leanRL
+# name "critic" for VF
+# give seed when reseting obs (for the first time only)
+# change clip_vf to clip_vloss ?
 
 from dataclasses import dataclass
 import wandb
+import random
 import numpy as np
 
 import gymnasium as gym
@@ -27,9 +36,10 @@ from torch.distributions.categorical import Categorical
 class Config:
     env_id: str = "CartPole-v1"
 
-    total_timesteps: int = 250_000
+    # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
+    total_timesteps: int = 100_000
     """ total number of timesteps collected for the training """
-    num_steps: int = 5_000
+    num_steps: int = 2_000
     """ number of steps per rollout (between updates) """
     
     num_epochs: int = 10
@@ -63,11 +73,12 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    log_wandb: bool = False
+    log_wandb: bool = True
 
     device: str = "cpu"
 
 class Agent(nn.Module):
+    # todo : rename envs
     def __init__(self, env: gym.vector.SyncVectorEnv):
         super().__init__()
 
@@ -129,7 +140,7 @@ def rollout():
     # action    : (1, action_dim)
     # reward    : (1,)
 
-    next_obs, _ = env.reset()
+    next_obs, _ = env.reset(seed=0)
     next_obs = torch.Tensor(next_obs).to(config.device)
     next_done = torch.ones(1)
 
@@ -196,11 +207,13 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
     """
 
+    b_inds = np.arange(config.num_steps)
     for _ in range(config.num_epochs):
-        indices = torch.randperm(config.num_steps)
+        #indices = torch.randperm(config.num_steps)
+        np.random.shuffle(b_inds)
         for start in range(0, 1 * config.num_steps, config.batch_size):
             end = start + config.batch_size
-            idx_batch = indices[start:end]
+            idx_batch = b_inds[start:end] #indices[start:end]
 
             b_obs = obs[idx_batch]
             b_actions = actions[idx_batch]
@@ -239,7 +252,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             loss_ent = b_entropy.mean()
 
             # total update
-            loss = loss_pi + config.vf_coef * loss_vf + config.ent_coef * loss_ent
+            loss = loss_pi + config.vf_coef * loss_vf - config.ent_coef * loss_ent
             loss.backward()
             _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
             optim.step()
@@ -247,16 +260,28 @@ def update(obs, actions, old_logp, adv, old_values, rets):
         
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
+            
+    y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
+    var_y = np.var(y_true)
+    explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+    return explained_var
 
 if __name__ == "__main__":
+
+    seed = 0
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+
     # 2_000/2^-5, 500/2^-6
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=2_000,
-                    lr=3e-4, vf_coef=0.5, gae_gamma=0.99, gae_lambda=0.95,
-                    log_wandb=False, device="cpu")
+    config = Config()
     
     if config.log_wandb:
         wandb.init(project="ppo", config={
             "algo": "ppo",
+            "source": "mine",
             "env_id": config.env_id,
             "total_timesteps": config.total_timesteps,
             "step_per_rollout": config.num_steps,
@@ -266,6 +291,7 @@ if __name__ == "__main__":
             "gae_lambda": config.gae_lambda,
         })
 
+    # todo : rename "envs"
     env = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
 
     agent = Agent(env)
@@ -275,11 +301,11 @@ if __name__ == "__main__":
 
     for step in range(total_steps):
         obs, actions, old_logp, adv, old_values, rets, ep_rets = rollout()
-        update(obs, actions, old_logp, adv, old_values, rets)
+        explained_var = update(obs, actions, old_logp, adv, old_values, rets)
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
         print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}.")
 
         if config.log_wandb:
-            wandb.log({"returns": np.mean(ep_rets)}, step=(step+1)*config.num_steps)
+            wandb.log({"returns": np.mean(ep_rets), "explained_var": explained_var}, step=(step+1)*config.num_steps)
