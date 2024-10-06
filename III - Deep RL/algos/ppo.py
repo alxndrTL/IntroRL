@@ -36,6 +36,8 @@ from torch.distributions.categorical import Categorical
 class Config:
     env_id: str = "CartPole-v1"
 
+    seed: int = 0
+
     # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
     total_timesteps: int = 100_000
     """ total number of timesteps collected for the training """
@@ -73,23 +75,22 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    log_wandb: bool = True
+    log_wandb: bool = False
 
     device: str = "cpu"
 
 class Agent(nn.Module):
-    # todo : rename envs
-    def __init__(self, env: gym.vector.SyncVectorEnv):
+    def __init__(self, envs: gym.vector.SyncVectorEnv):
         super().__init__()
 
         self.policy = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 32),
+            nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32),
             nn.Tanh(),
-            nn.Linear(32, env.single_action_space.n)
+            nn.Linear(32, envs.single_action_space.n)
         )
 
         self.value_func = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 32),
+            nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32),
             nn.Tanh(),
             nn.Linear(32, 1)
         )
@@ -128,19 +129,23 @@ def rollout():
     collect num_steps timesteps of experience in the environment
     """
 
-    b_observations = torch.zeros((config.num_steps,) + env.single_observation_space.shape).to(config.device)
-    b_actions = torch.zeros((config.num_steps,) + env.single_action_space.shape).to(config.device)
+    b_observations = torch.zeros((config.num_steps,) + envs.single_observation_space.shape).to(config.device)
+    b_actions = torch.zeros((config.num_steps,) + envs.single_action_space.shape).to(config.device)
     b_logp = torch.zeros((config.num_steps,)).to(config.device)
     b_rewards = torch.zeros(config.num_steps).to(config.device)
     b_dones = torch.zeros(config.num_steps).to(config.device)
     b_values = torch.zeros(config.num_steps).to(config.device)
+    returns = []
+    ret = 0
 
     # next_obs  : (1, obs_dim)
     # next_done : (1,)
     # action    : (1, action_dim)
     # reward    : (1,)
 
-    next_obs, _ = env.reset(seed=0)
+    seed = 0 if step==0 else None
+
+    next_obs, _ = envs.reset(seed=seed)
     next_obs = torch.Tensor(next_obs).to(config.device)
     next_done = torch.ones(1)
 
@@ -152,7 +157,8 @@ def rollout():
             action, logp, _, value = agent.get_action_value(next_obs)
 
         # env step (if done, next_obs is the obs of the new episode)
-        next_obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
+        next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
+        ret += reward[0]
         next_done = np.logical_or(terminated, truncated)
         next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
@@ -160,6 +166,11 @@ def rollout():
         b_logp[t] = logp
         b_rewards[t] = torch.tensor(reward).to(config.device)
         b_values[t] = value
+
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                returns.append(ret)
+                ret = 0
 
     with torch.no_grad():
         next_value = agent.get_value(next_obs)
@@ -207,13 +218,11 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
     """
 
-    b_inds = np.arange(config.num_steps)
     for _ in range(config.num_epochs):
-        #indices = torch.randperm(config.num_steps)
-        np.random.shuffle(b_inds)
+        indices = torch.randperm(config.num_steps)
         for start in range(0, 1 * config.num_steps, config.batch_size):
             end = start + config.batch_size
-            idx_batch = b_inds[start:end] #indices[start:end]
+            idx_batch = indices[start:end]
 
             b_obs = obs[idx_batch]
             b_actions = actions[idx_batch]
@@ -238,6 +247,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
                 approx_kl = torch.mean(((ratio - 1) - log_ratio))
             
             # value loss (0.5 is to ensure same vf_coef as with other implementations)
+            b_values = b_values.view(-1)
             if config.clip_vf:
                 loss_vf_unclipped = (b_rets - b_values)**2
 
@@ -267,16 +277,13 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     return explained_var
 
 if __name__ == "__main__":
-
-    seed = 0
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-
     # 2_000/2^-5, 500/2^-6
     config = Config()
+
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    torch.backends.cudnn.deterministic = True
     
     if config.log_wandb:
         wandb.init(project="ppo", config={
@@ -292,9 +299,9 @@ if __name__ == "__main__":
         })
 
     # todo : rename "envs"
-    env = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
+    envs = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
 
-    agent = Agent(env)
+    agent = Agent(envs)
     optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)
     
     total_steps = config.total_timesteps // config.num_steps
