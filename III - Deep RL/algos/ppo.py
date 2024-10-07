@@ -15,9 +15,6 @@ only works with 1 env
 # reprendre wandb typo de leanRL
 
 # lire papier implementations details of ppo + intégrer notes lec6
-# implementation details :
-# obs & reward norm & clip
-# anneal LR
 
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
 
@@ -65,6 +62,8 @@ class Config:
 
     lr: float = 3e-4
     """ learning rate (policy and value function) """
+    anneal_lr: bool = False
+    """ whether or not to anneal the LR throughout training """
 
     max_kl: float = None
     """ threshold for the KL div between old and new policy. Above this, the current update stops. """
@@ -324,9 +323,14 @@ if __name__ == "__main__":
         obs, actions, old_logp, adv, old_values, rets, ep_rets = rollout()
         explained_var = update(obs, actions, old_logp, adv, old_values, rets)
 
+        if config.anneal_lr:
+            frac = 1.0 - (step / total_steps)
+            lr = frac * config.lr
+            optim.param_groups[0]["lr"] = lr
+
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
         print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}.")
 
         if config.log_wandb:
-            wandb.log({"returns": np.mean(ep_rets), "explained_var": explained_var}, step=(step+1)*config.num_steps)
+            wandb.log({"returns": np.mean(ep_rets), "explained_var": explained_var, "lr": optim.param_groups[0]["lr"]}, step=(step+1)*config.num_steps)
