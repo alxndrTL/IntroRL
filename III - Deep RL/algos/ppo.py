@@ -10,12 +10,16 @@ only works with 1 env
 # multi envs?
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
 # mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
-# lire papier implementations details of ppo + intégrer notes lec6
 # leanrl version (torch compile & cuda graphs)
-# reward centering
-# anneal LR
+
 # reprendre wandb typo de leanRL
-# give seed when reseting obs (for the first time only)
+
+# lire papier implementations details of ppo + intégrer notes lec6
+# implementation details :
+# obs & reward norm & clip
+# anneal LR
+
+# re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
 
 from dataclasses import dataclass
 import wandb
@@ -32,13 +36,15 @@ from torch.distributions.categorical import Categorical
 class Config:
     env_id: str = "CartPole-v1"
 
-    seed: int = 2
+    seed: int = 3
 
     # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
     total_timesteps: int = 100_000
     """ total number of timesteps collected for the training """
     num_steps: int = 2_000
     """ number of steps per rollout (between updates) """
+    num_envs: int = 1
+    """ number of parallel envs used at each rollout """
     
     num_epochs: int = 10
     """ number of passes over each rollout experience (it is then discarded) """
@@ -75,6 +81,19 @@ class Config:
 
     device: str = "cpu"
 
+def make_env(env_id, gamma):
+    def thunk():
+        env = gym.make(env_id)
+        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        #env = gym.wrappers.ClipAction(env) # only for Box action spaces
+        env = gym.wrappers.NormalizeObservation(env)
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        return env
+    return thunk
+
 class Agent(nn.Module):
     def __init__(self, envs: gym.vector.SyncVectorEnv):
         super().__init__()
@@ -90,6 +109,14 @@ class Agent(nn.Module):
             nn.Tanh(),
             nn.Linear(32, 1)
         )
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
 
     def get_value(self, obs):
         return self.critic(obs)
@@ -132,14 +159,13 @@ def rollout():
     b_dones = torch.zeros(config.num_steps).to(config.device)
     b_values = torch.zeros(config.num_steps).to(config.device)
     returns = []
-    ret = 0
 
     # next_obs  : (1, obs_dim)
     # next_done : (1,)
     # action    : (1, action_dim)
     # reward    : (1,)
 
-    seed = 0 if step==0 else None
+    seed = config.seed if step==0 else None
 
     next_obs, _ = envs.reset(seed=seed)
     next_obs = torch.Tensor(next_obs).to(config.device)
@@ -154,7 +180,6 @@ def rollout():
 
         # env step (if done, next_obs is the obs of the new episode)
         next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
-        ret += reward[0]
         next_done = np.logical_or(terminated, truncated)
         next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
@@ -165,9 +190,10 @@ def rollout():
 
         if "final_info" in infos:
             for info in infos["final_info"]:
-                returns.append(ret)
-                ret = 0
+                r = float(info["episode"]["r"].reshape(()))
+                returns.append(r)
 
+    # bootstrap final step
     with torch.no_grad():
         next_value = agent.get_value(next_obs)
     
@@ -179,8 +205,6 @@ def rollout():
     """
     b_adv = torch.zeros(config.num_steps)
     gae = 0
-    returns = [] # for logging, one per traj
-    ret = 0
 
     next_value = next_value
     next_nonterminal = 1.0 - next_done
@@ -188,11 +212,6 @@ def rollout():
         delta = b_rewards[t] + next_nonterminal * config.gae_gamma * next_value - b_values[t]
         gae = delta + next_nonterminal * config.gae_gamma * config.gae_lambda * gae
         b_adv[t] = gae
-
-        ret += b_rewards[t]
-        if b_dones[t]:
-            returns.append(ret)
-            ret = 0
 
         next_value = b_values[t]
         next_nonterminal = 1.0 - b_dones[t]
@@ -294,8 +313,7 @@ if __name__ == "__main__":
             "gae_lambda": config.gae_lambda,
         })
 
-    # todo : rename "envs"
-    envs = gym.vector.SyncVectorEnv([lambda: gym.make(config.env_id)])
+    envs = gym.vector.SyncVectorEnv([make_env(config.env_id, config.gae_gamma) for i in range(config.num_envs)])
 
     agent = Agent(envs)
     optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)
