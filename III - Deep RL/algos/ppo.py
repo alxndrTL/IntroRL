@@ -69,7 +69,8 @@ class Config:
     """ threshold for the KL div between old and new policy. Above this, the current update stops. """
 
     gae_gamma: float = 0.99
-    """ gamma for advantage computation (technically, discount factor is 1) """
+    """ gamma for advantage computation (technically, discount factor is 1)
+        a good heuristic is knowing that the 1/(1-gamma) is the "sight" of the agent"""
     gae_lambda: float = 0.95
     """ lambda for advantage computation """
 
@@ -157,7 +158,8 @@ def rollout():
     b_rewards = torch.zeros(config.num_steps).to(config.device)
     b_dones = torch.zeros(config.num_steps).to(config.device)
     b_values = torch.zeros(config.num_steps).to(config.device)
-    returns = []
+    ep_returns = []
+    ep_lengths = []
 
     # next_obs  : (1, obs_dim)
     # next_done : (1,)
@@ -190,7 +192,9 @@ def rollout():
         if "final_info" in infos:
             for info in infos["final_info"]:
                 r = float(info["episode"]["r"].reshape(()))
-                returns.append(r)
+                l = float(info["episode"]["l"].reshape(()))
+                ep_returns.append(r)
+                ep_lengths.append(l)
 
     # bootstrap final step
     with torch.no_grad():
@@ -217,7 +221,7 @@ def rollout():
 
     b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
-    return b_observations, b_actions, b_logp, b_adv, b_values, b_returns, returns
+    return b_observations, b_actions, b_logp, b_adv, b_values, b_returns, ep_returns, ep_lengths
 
 def update(obs, actions, old_logp, adv, old_values, rets):
     """
@@ -231,6 +235,9 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     all these are supposed to be collected in a rollout phase
     here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
     """
+
+    #ent = []
+    kls = []
 
     for _ in range(config.num_epochs):
         indices = torch.randperm(config.num_steps)
@@ -274,21 +281,24 @@ def update(obs, actions, old_logp, adv, old_values, rets):
 
             # entropy loss
             loss_ent = b_entropy.mean()
-
+            
             # total update
             loss = loss_pi + config.vf_coef * loss_vf - config.ent_coef * loss_ent
             loss.backward()
             _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
             optim.step()
             optim.zero_grad()
-        
+
+            #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
+            kls.append(approx_kl)
+
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
             
     y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-    return explained_var
+    return explained_var, np.mean(kls)
 
 if __name__ == "__main__":
     # 2_000/2^-5, 500/2^-6
@@ -320,8 +330,8 @@ if __name__ == "__main__":
     total_steps = config.total_timesteps // config.num_steps
 
     for step in range(total_steps):
-        obs, actions, old_logp, adv, old_values, rets, ep_rets = rollout()
-        explained_var = update(obs, actions, old_logp, adv, old_values, rets)
+        obs, actions, old_logp, adv, old_values, rets, ep_rets, ep_lengths = rollout()
+        explained_var, mean_kl = update(obs, actions, old_logp, adv, old_values, rets)
 
         if config.anneal_lr:
             frac = 1.0 - (step / total_steps)
@@ -330,7 +340,11 @@ if __name__ == "__main__":
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg return: {np.mean(ep_rets):.2f}.")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(ep_rets):.2f}. Avg episode length: {np.mean(ep_lengths):.2f}")
 
         if config.log_wandb:
-            wandb.log({"returns": np.mean(ep_rets), "explained_var": explained_var, "lr": optim.param_groups[0]["lr"]}, step=(step+1)*config.num_steps)
+            wandb.log({"returns": np.mean(ep_rets), "lengths": np.mean(ep_lengths),
+                       "returns_std": np.std(ep_rets), "lengths_std": np.std(ep_lengths),
+                       "explained_var": explained_var, "mean_kl": mean_kl,
+                       "lr": optim.param_groups[0]["lr"]},
+                       step=(step+1)*config.num_steps)
