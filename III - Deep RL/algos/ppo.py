@@ -20,6 +20,12 @@ https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
 
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
 
+# remplacer torch.mean() par .mean() ?
+
+# blog imple details :
+# 1
+# 12 : clipfrac
+ 
 from dataclasses import dataclass
 import wandb
 import random
@@ -64,7 +70,7 @@ class Config:
 
     lr: float = 3e-4
     """ learning rate (policy and value function) """
-    anneal_lr: bool = False
+    anneal_lr: bool = True
     """ whether or not to anneal the LR throughout training """
 
     max_kl: float = None
@@ -96,29 +102,26 @@ def make_env(env_id, gamma):
         return env
     return thunk
 
+def layer_init(layer, gain=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, gain=gain)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 class Agent(nn.Module):
     def __init__(self, envs: gym.vector.SyncVectorEnv):
         super().__init__()
 
         self.policy = nn.Sequential(
-            nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32)),
             nn.Tanh(),
-            nn.Linear(32, envs.single_action_space.n)
+            layer_init(nn.Linear(32, envs.single_action_space.n), gain=0.01)
         )
 
         self.critic = nn.Sequential(
-            nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32)),
             nn.Tanh(),
-            nn.Linear(32, 1)
+            layer_init(nn.Linear(32, 1), gain=1.0)
         )
-
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
 
     def get_value(self, obs):
         return self.critic(obs)
@@ -336,7 +339,7 @@ if __name__ == "__main__":
         explained_var, mean_kl = update(obs, actions, old_logp, adv, old_values, rets)
 
         if config.anneal_lr:
-            frac = 1.0 - (step / total_steps)
+            frac = 1.0 - ((step+1) / total_steps)
             lr = frac * config.lr
             optim.param_groups[0]["lr"] = lr
 
