@@ -3,7 +3,11 @@ Proximal Policy Optimization (PPO) algorithm
 with Generalized Advantage Estimation (GAE)
 
 only works with 1 env
+
+https://arxiv.org/abs/2005.12729
+https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
 """
+
 
 # TODO
 # pistes d'améliorations:
@@ -13,8 +17,6 @@ only works with 1 env
 # leanrl version (torch compile & cuda graphs)
 
 # reprendre wandb typo de leanRL
-
-# lire papier implementations details of ppo + intégrer notes lec6
 
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
 
