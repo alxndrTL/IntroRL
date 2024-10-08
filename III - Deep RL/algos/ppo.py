@@ -6,6 +6,8 @@ only works with 1 env
 
 https://arxiv.org/abs/2005.12729
 https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
+
+PPO check : 400 episodic return in breakout
 """
 
 
@@ -27,6 +29,7 @@ https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
 # 12 : clipfrac
  
 from dataclasses import dataclass
+from collections import deque
 import wandb
 import random
 import numpy as np
@@ -152,7 +155,7 @@ class Agent(nn.Module):
         
         return action, logp, ent, self.critic(obs)
 
-def rollout():
+def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     """
     collect num_steps timesteps of experience in the environment
     """
@@ -163,19 +166,18 @@ def rollout():
     b_rewards = torch.zeros(config.num_steps).to(config.device)
     b_dones = torch.zeros(config.num_steps).to(config.device)
     b_values = torch.zeros(config.num_steps).to(config.device)
-    ep_returns = []
-    ep_lengths = []
 
     # next_obs  : (1, obs_dim)
     # next_done : (1,)
     # action    : (1, action_dim)
     # reward    : (1,)
 
-    seed = config.seed if step==0 else None
-
-    next_obs, _ = envs.reset(seed=seed)
-    next_obs = torch.Tensor(next_obs).to(config.device)
-    next_done = torch.ones(1)
+    if next_obs is None:
+        next_obs, _ = envs.reset(seed=config.seed)
+        next_obs = torch.Tensor(next_obs).to(config.device)
+        next_done = torch.ones(1)
+        avg_returns = deque(maxlen=20)
+        avg_lengths = deque(maxlen=20)
 
     for t in range(config.num_steps):
         b_observations[t] = next_obs
@@ -198,8 +200,8 @@ def rollout():
             for info in infos["final_info"]:
                 r = float(info["episode"]["r"].reshape(()))
                 l = float(info["episode"]["l"].reshape(()))
-                ep_returns.append(r)
-                ep_lengths.append(l)
+                avg_returns.append(r)
+                avg_lengths.append(l)
 
     # bootstrap final step
     with torch.no_grad():
@@ -226,7 +228,7 @@ def rollout():
 
     b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
-    return b_observations, b_actions, b_logp, b_adv, b_values, b_returns, ep_returns, ep_lengths
+    return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths
 
 def update(obs, actions, old_logp, adv, old_values, rets):
     """
@@ -334,8 +336,11 @@ if __name__ == "__main__":
     
     total_steps = config.total_timesteps // config.num_steps
 
+    next_obs, next_done = None, None
+    avg_returns, avg_lengths = None, None
+
     for step in range(total_steps):
-        obs, actions, old_logp, adv, old_values, rets, ep_rets, ep_lengths = rollout()
+        next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths = rollout(next_obs, next_done, avg_returns, avg_lengths)
         explained_var, mean_kl = update(obs, actions, old_logp, adv, old_values, rets)
 
         if config.anneal_lr:
@@ -345,11 +350,11 @@ if __name__ == "__main__":
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(ep_rets):.2f}. Avg episode length: {np.mean(ep_lengths):.2f}")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(avg_returns):.2f}. Avg episode length: {np.mean(avg_lengths):.2f}")
 
         if config.log_wandb:
-            wandb.log({"returns": np.mean(ep_rets), "lengths": np.mean(ep_lengths),
-                       "returns_std": np.std(ep_rets), "lengths_std": np.std(ep_lengths),
+            wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
+                       "returns_std": np.std(avg_returns), "lengths_std": np.std(avg_lengths),
                        "explained_var": explained_var, "mean_kl": mean_kl,
                        "lr": optim.param_groups[0]["lr"]},
                        step=(step+1)*config.num_steps)
