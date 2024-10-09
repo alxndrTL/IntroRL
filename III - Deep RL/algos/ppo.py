@@ -22,8 +22,6 @@ PPO check : 400 episodic return in breakout
 
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
 
-# remplacer torch.mean() par .mean() ?
-
 # blog imple details :
 # 12 : clipfrac
  
@@ -267,11 +265,11 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             log_ratio = b_logp - b_old_logp
             ratio = torch.exp(log_ratio)
             clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
-            loss_pi = -torch.mean(torch.min(ratio * b_adv, clip_adv))
+            loss_pi = -torch.min(ratio * b_adv, clip_adv).mean()
 
             # KL computations (http://joschu.net/blog/kl-approx.html)
             with torch.no_grad():
-                approx_kl = torch.mean(((ratio - 1) - log_ratio))
+                approx_kl = ((ratio - 1) - log_ratio).mean()
             
             # value loss (0.5 is to ensure same vf_coef as with other implementations)
             b_values = b_values.view(-1)
@@ -281,9 +279,9 @@ def update(obs, actions, old_logp, adv, old_values, rets):
                 b_values_clipped = b_old_values + torch.clamp(b_values - b_old_values, -config.clip_ratio, +config.clip_ratio)
                 loss_vf_clipped = (b_rets - b_values_clipped)**2
 
-                loss_vf = 0.5 * torch.mean(torch.max(loss_vf_unclipped, loss_vf_clipped))
+                loss_vf = 0.5 * torch.max(loss_vf_unclipped, loss_vf_clipped).mean()
             else:
-                loss_vf = 0.5 * torch.mean((b_rets - b_values)**2)
+                loss_vf = 0.5 * ((b_rets - b_values)**2).mean()
 
             # entropy loss
             loss_ent = b_entropy.mean()
