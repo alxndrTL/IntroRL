@@ -25,7 +25,6 @@ PPO check : 400 episodic return in breakout
 # remplacer torch.mean() par .mean() ?
 
 # blog imple details :
-# 1
 # 12 : clipfrac
  
 from dataclasses import dataclass
