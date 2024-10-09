@@ -21,9 +21,6 @@ PPO check : 400 episodic return in breakout
 # reprendre wandb typo de leanRL
 
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
-
-# blog imple details :
-# 12 : clipfrac
  
 from dataclasses import dataclass
 from collections import deque
@@ -241,6 +238,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     """
 
     #ent = []
+    clipfracs = []
     kls = []
 
     for _ in range(config.num_epochs):
@@ -267,9 +265,9 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
             loss_pi = -torch.min(ratio * b_adv, clip_adv).mean()
 
-            # KL computations (http://joschu.net/blog/kl-approx.html)
             with torch.no_grad():
-                approx_kl = ((ratio - 1) - log_ratio).mean()
+                approx_kl = ((ratio - 1) - log_ratio).mean() # (http://joschu.net/blog/kl-approx.html)
+                clipfracs.append(((ratio - 1.0).abs() > config.clip_ratio).float().mean().item())
             
             # value loss (0.5 is to ensure same vf_coef as with other implementations)
             b_values = b_values.view(-1)
@@ -302,7 +300,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-    return explained_var, np.mean(kls)
+    return explained_var, np.mean(kls), clipfracs
 
 if __name__ == "__main__":
     # 2_000/2^-5, 500/2^-6
@@ -338,7 +336,7 @@ if __name__ == "__main__":
 
     for step in range(total_steps):
         next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths = rollout(next_obs, next_done, avg_returns, avg_lengths)
-        explained_var, mean_kl = update(obs, actions, old_logp, adv, old_values, rets)
+        explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
 
         if config.anneal_lr:
             frac = 1.0 - ((step+1) / total_steps)
@@ -352,6 +350,6 @@ if __name__ == "__main__":
         if config.log_wandb:
             wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
                        "returns_std": np.std(avg_returns), "lengths_std": np.std(avg_lengths),
-                       "explained_var": explained_var, "mean_kl": mean_kl,
+                       "explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
                        "lr": optim.param_groups[0]["lr"]},
                        step=(step+1)*config.num_steps)
