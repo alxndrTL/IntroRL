@@ -39,12 +39,11 @@ class Config:
 
     seed: int = 3
 
-    # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
     total_timesteps: int = 100_000
     """ total number of timesteps collected for the training """
-    num_steps: int = 1_000
+    num_steps: int = 2_000
     """ number of steps per rollout (between updates) """
-    num_envs: int = 2
+    num_envs: int = 1
     """ number of parallel envs used at each rollout """
     
     num_epochs: int = 10
