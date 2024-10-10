@@ -14,16 +14,13 @@ PPO check : 400 episodic return in breakout
 # TODO
 # pistes d'améliorations:
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
-# mettre en place pipeline de training/comparaison (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # leanrl version (torch compile & cuda graphs)
-
-# reprendre wandb typo de leanRL
-
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
  
 from dataclasses import dataclass
 from typing import Optional
 from collections import deque
+import time
 import wandb
 import tyro
 import random
@@ -34,6 +31,8 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
+
+from misc import format_time
 
 @dataclass
 class Config:
@@ -85,6 +84,9 @@ class Config:
     log_wandb: bool = False
 
     device: str = "cpu"
+
+    measure_burnin: int = 3
+    """ number of steps to skip at the beginning before tracking speed """
 
 def make_env(env_id, gamma):
     def thunk():
@@ -344,22 +346,37 @@ if __name__ == "__main__":
     next_obs, next_done = None, None
     avg_returns, avg_lengths = None, None
 
+    start_time = time.time()
+
     for step in range(total_steps):
+        t0 = time.time()
+
         next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths = rollout(next_obs, next_done, avg_returns, avg_lengths)
         explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
 
+        t1 = time.time()
+
+        # lr annealing
         if config.anneal_lr:
             frac = 1.0 - ((step+1) / total_steps)
             lr = frac * config.lr
             optim.param_groups[0]["lr"] = lr
 
+        # printing and logging
+        uptime = time.time() - start_time
+        total_time = ((total_steps*config.num_steps) * uptime) / ((step+1) * config.num_steps)
+        eta = total_time - uptime
+
+        timesteps_per_s = config.num_steps*config.num_envs / (t1-t0)
+
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(avg_returns):.2f}. Avg episode length: {np.mean(avg_lengths):.2f}")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(avg_returns):.2f}. Avg episode length: {np.mean(avg_lengths):.2f}. Timesteps/s: {timesteps_per_s:.0f}. ETA: {format_time(eta)}.")
 
         if config.log_wandb:
             wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
                        "returns_std": np.std(avg_returns), "lengths_std": np.std(avg_lengths),
                        "explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
-                       "lr": optim.param_groups[0]["lr"]},
+                       "lr": optim.param_groups[0]["lr"],
+                       "timesteps_per_s": timesteps_per_s},
                        step=(step+1)*config.num_steps)
