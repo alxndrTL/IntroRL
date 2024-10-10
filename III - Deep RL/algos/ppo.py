@@ -2,14 +2,11 @@
 Proximal Policy Optimization (PPO) algorithm
 with Generalized Advantage Estimation (GAE)
 
-only works with 1 env
-
 https://arxiv.org/abs/2005.12729
 https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
 
 PPO check : 400 episodic return in breakout
 """
-
 
 # TODO
 # pistes d'améliorations:
