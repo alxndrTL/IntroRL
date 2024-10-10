@@ -361,7 +361,7 @@ if __name__ == "__main__":
 
     print(f"Run {run_name} starting.")
     
-    total_steps = config.total_timesteps // config.num_steps
+    total_steps = config.total_timesteps // (config.num_steps*config.num_envs)
 
     next_obs, next_done = None, None
     avg_returns, avg_lengths = None, None
@@ -399,7 +399,7 @@ if __name__ == "__main__":
                        "explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
-                       step=(step+1)*config.num_steps)
+                       step=(step+1)*config.num_steps*config.num_envs)
     
     envs.close()
 

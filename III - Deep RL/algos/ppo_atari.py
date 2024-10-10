@@ -21,7 +21,7 @@ import random
 import numpy as np
 
 import envpool
-import gymnasium as gym
+import gym
 
 import torch
 import torch.nn as nn
@@ -33,7 +33,7 @@ from misc import format_time
 class Config:
     env_id: str = "Breakout-v5"
 
-    seed: int = 0
+    seed: int = 1
 
     total_timesteps: int = 10_000_000
     """ total number of timesteps collected for the training """
@@ -81,14 +81,14 @@ class Config:
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
 
-    log_wandb: bool = False
+    log_wandb: bool = True
     
     save_ckpt: bool = False
     """ whether or not to save the agent in a .pth file at the end of training """
 
     capture_video: bool = True
     """ whether or not to record interactions during training """
-    capture_interval: int = 20_000
+    capture_interval: int = 200_000
     """ number of total timesteps in between the recordings """
     capture_length: int = 0
     """ video length for each recording """
@@ -132,7 +132,7 @@ def layer_init(layer, gain=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs: gym.vector.SyncVectorEnv):
+    def __init__(self, envs):
         super().__init__()
 
         self.core = nn.Sequential(
@@ -147,7 +147,7 @@ class Agent(nn.Module):
             nn.ReLU(),
         )
         self.policy = layer_init(nn.Linear(512, envs.single_action_space.n), gain=0.01)
-        self.critic = layer_init(nn.Linear(512, 32), gain=1.0)
+        self.critic = layer_init(nn.Linear(512, 1), gain=1.0)
 
     def get_value(self, obs):
         return self.critic(self.core(obs / 255.))
@@ -180,7 +180,7 @@ class Agent(nn.Module):
         
         return action, logp, ent, self.critic(hidden)
 
-def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
+def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, max_ret=0):
     """
     collect num_steps timesteps of experience in the environment
     """
@@ -198,7 +198,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     # reward    : (num_envs,)
 
     if next_obs is None:
-        next_obs, _ = envs.reset(seed=config.seed)
+        next_obs = envs.reset() # seed=config.seed)
         next_obs = torch.Tensor(next_obs).to(config.device)
         next_done = torch.ones(config.num_envs).to(config.device)
         avg_returns = deque(maxlen=20)
@@ -212,8 +212,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
             action, logp, _, value = agent.get_action_value(next_obs)
 
         # env step (if done, next_obs is the obs of the new episode)
-        next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
-        next_done = np.logical_or(terminated, truncated)
+        next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
         next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
 
         b_actions[t] = action
@@ -221,18 +220,17 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
         b_rewards[t] = torch.tensor(reward).to(config.device)
         b_values[t] = value.flatten() # value was (num_envs, 1)
 
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if info is not None:
-                    r = float(info["episode"]["r"].reshape(()))
-                    l = float(info["episode"]["l"].reshape(()))
-                    avg_returns.append(r)
-                    avg_lengths.append(l)
+        for idx, d in enumerate(next_done):
+            if d and infos["lives"][idx] == 0:
+                r = float(infos["r"][idx])
+                max_ret = max(r, max_ret)
+                l = float(infos["l"][idx])
+                avg_returns.append(r)
+                avg_lengths.append(l)
 
     # bootstrap final step
     with torch.no_grad():
-        next_value = agent.get_value(next_obs)
-        next_value = next_value.flatten()
+        next_value = agent.get_value(next_obs).flatten()
     
     """
     GAE advantage computation : A_t = sum_{l=0} (gamma*lambda)^l delta_{t+l}
@@ -240,7 +238,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     A nice way to compute it is to start from the end by first computing the last delta_T
     and then add to it delta_{T-1}, delta_{T-2} etc, but each time decaying the advantage by gamma*lambda
     """
-    b_adv = torch.zeros(config.num_steps, config.num_envs)
+    b_adv = torch.zeros(config.num_steps, config.num_envs).to(config.device)
     gae = 0
 
     next_value = next_value
@@ -264,7 +262,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     b_values = b_values.reshape(-1)
     b_returns = b_returns.reshape(-1)
 
-    return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths
+    return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths, max_ret
 
 def update(obs, actions, old_logp, adv, old_values, rets):
     """
@@ -281,11 +279,11 @@ def update(obs, actions, old_logp, adv, old_values, rets):
 
     #ent = []
     clipfracs = []
-    kls = []
+    #kls = []
 
     for _ in range(config.num_epochs):
-        indices = torch.randperm(config.num_steps)
-        for start in range(0, 1 * config.num_steps, config.batch_size):
+        indices = torch.randperm(config.num_steps*config.num_envs)
+        for start in range(0, config.num_steps*config.num_envs, config.batch_size):
             end = start + config.batch_size
             idx_batch = indices[start:end]
 
@@ -334,7 +332,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             optim.zero_grad()
 
             #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
-            kls.append(approx_kl)
+            #kls.append(approx_kl)
 
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
@@ -342,7 +340,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-    return explained_var, np.mean(kls), clipfracs
+    return explained_var, np.mean([0]), clipfracs
 
 if __name__ == "__main__":
     config = tyro.cli(Config)
@@ -353,7 +351,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
     
     if config.log_wandb:
-        wandb.init(project="ppo", config={"algo": "ppo", **vars(config)},)
+        wandb.init(project="ppo_atari", config={**vars(config)},)
         run_name = wandb.run.name
     else:
         run_name = ''.join(random.choice(string.ascii_letters) for _ in range(8))
@@ -378,17 +376,19 @@ if __name__ == "__main__":
 
     print(f"Run {run_name} starting.")
     
-    total_steps = config.total_timesteps // config.num_steps
+    total_steps = config.total_timesteps // (config.num_steps*config.num_envs)
 
     next_obs, next_done = None, None
     avg_returns, avg_lengths = None, None
 
     start_time = time.time()
 
+    max_ret = -999999
+
     for step in range(total_steps):
         t0 = time.time()
 
-        next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths = rollout(next_obs, next_done, avg_returns, avg_lengths)
+        next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
         explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
 
         t1 = time.time()
@@ -401,14 +401,14 @@ if __name__ == "__main__":
 
         # printing and logging
         uptime = time.time() - start_time
-        total_time = ((total_steps*config.num_steps) * uptime) / ((step+1) * config.num_steps)
+        total_time = ((total_steps*config.num_steps*config.num_envs) * uptime) / ((step+1) * config.num_steps*config.num_envs)
         eta = total_time - uptime
 
         timesteps_per_s = config.num_steps*config.num_envs / (t1-t0)
 
         num_digits = len(str(total_steps))
         formatted_iter = f"{step+1:0{num_digits}d}"
-        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(avg_returns):.2f}. Avg episode length: {np.mean(avg_lengths):.2f}. Timesteps/s: {timesteps_per_s:.0f}. ETA: {format_time(eta)}.")
+        print(f"Step: {formatted_iter}/{total_steps}. Avg episode return: {np.mean(avg_returns):.2f}. Max episode return: {max_ret}. Avg episode length: {np.mean(avg_lengths):.2f}. Timesteps/s: {timesteps_per_s:.0f}. ETA: {format_time(eta)}.")
 
         if config.log_wandb:
             wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
@@ -416,7 +416,7 @@ if __name__ == "__main__":
                        "explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
-                       step=(step+1)*config.num_steps)
+                       step=(step+1)*config.num_steps*config.num_envs)
     
     envs.close()
 
