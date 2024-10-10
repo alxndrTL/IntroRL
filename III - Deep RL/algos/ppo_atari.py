@@ -31,35 +31,35 @@ from misc import format_time
 
 @dataclass
 class Config:
-    env_id: str = "CartPole-v1"
+    env_id: str = "Breakout-v5"
 
-    seed: int = 3
+    seed: int = 0
 
-    total_timesteps: int = 100_000
+    total_timesteps: int = 10_000_000
     """ total number of timesteps collected for the training """
-    num_steps: int = 2_000
+    num_steps: int = 128
     """ number of steps per rollout (between updates) """
-    num_envs: int = 1
+    num_envs: int = 8
     """ number of parallel envs used at each rollout """
     
-    num_epochs: int = 10
+    num_epochs: int = 4
     """ number of passes over each rollout experience (it is then discarded) """
-    batch_size: int = 64
+    batch_size: int = 256
     """ batch size of each update """
 
-    normalize_adv: bool = False
+    normalize_adv: bool = True
     """ whether or not to normalize the advantage in the policy update """
 
-    clip_ratio: float = 0.2
+    clip_ratio: float = 0.1
     """ clipping ratio between old and new policy probs """
-    clip_loss_vf: bool = False
+    clip_loss_vf: bool = True
     """ whether or not to apply a clipping strategy on the vf loss (done with pi_loss) """
     vf_coef: float = 0.5
     """ coefficient of the value function in the total loss """
-    ent_coef: float = 0.
+    ent_coef: float = 0.01
     """ coefficient of the policy entropy in the total loss """
 
-    lr: float = 3e-4
+    lr: float = 2.5e-4
     """ learning rate (policy and value function) """
     anneal_lr: bool = True
     """ whether or not to anneal the LR throughout training """
@@ -76,7 +76,7 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    device: str = "cpu"
+    device: str = "cuda"
 
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
@@ -93,24 +93,38 @@ class Config:
     capture_length: int = 0
     """ video length for each recording """
 
-def make_env(idx):
-    def thunk():
-        if config.capture_video and idx == 0:
-            env = gym.make(config.env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, video_folder=f"videos/{run_name}", name_prefix="training", 
-                                           step_trigger=lambda i: i % (config.capture_interval//config.num_envs) == 0,
-                                           video_length=config.capture_length, disable_logger=True)
-        else:
-            env = gym.make(config.env_id)
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        #env = gym.wrappers.ClipAction(env) # only for Box action spaces
-        env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=config.gae_gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        return env
-    return thunk
+class RecordEpisodeStatistics(gym.Wrapper):
+    def __init__(self, env, deque_size=100):
+        super().__init__(env)
+        self.num_envs = getattr(env, "num_envs", 1)
+        self.episode_returns = None
+        self.episode_lengths = None
+
+    def reset(self, **kwargs):
+        observations = super().reset(**kwargs)
+        self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        self.lives = np.zeros(self.num_envs, dtype=np.int32)
+        self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        return observations
+
+    def step(self, action):
+        observations, rewards, dones, infos = super().step(action)
+        self.episode_returns += infos["reward"]
+        self.episode_lengths += 1
+        self.returned_episode_returns[:] = self.episode_returns
+        self.returned_episode_lengths[:] = self.episode_lengths
+        self.episode_returns *= 1 - infos["terminated"]
+        self.episode_lengths *= 1 - infos["terminated"]
+        infos["r"] = self.returned_episode_returns
+        infos["l"] = self.returned_episode_lengths
+        return (
+            observations,
+            rewards,
+            dones,
+            infos,
+        )
 
 def layer_init(layer, gain=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, gain=gain)
@@ -121,20 +135,22 @@ class Agent(nn.Module):
     def __init__(self, envs: gym.vector.SyncVectorEnv):
         super().__init__()
 
-        self.policy = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32)),
-            nn.Tanh(),
-            layer_init(nn.Linear(32, envs.single_action_space.n), gain=0.01)
+        self.core = nn.Sequential(
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            nn.ReLU(),
         )
-
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 32)),
-            nn.Tanh(),
-            layer_init(nn.Linear(32, 1), gain=1.0)
-        )
+        self.policy = layer_init(nn.Linear(512, envs.single_action_space.n), gain=0.01)
+        self.critic = layer_init(nn.Linear(512, 32), gain=1.0)
 
     def get_value(self, obs):
-        return self.critic(obs)
+        return self.critic(self.core(obs / 255.))
     
     def get_action_value(self, obs, action=None):
         """
@@ -148,7 +164,9 @@ class Agent(nn.Module):
         > logp: (B)
         """
 
-        logits = self.policy(obs)
+        hidden = self.core(obs / 255.)
+
+        logits = self.policy(hidden)
         probs = Categorical(logits=logits)
 
         if action is None:
@@ -160,7 +178,7 @@ class Agent(nn.Module):
             ent = probs.entropy()
             action = None
         
-        return action, logp, ent, self.critic(obs)
+        return action, logp, ent, self.critic(hidden)
 
 def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     """
@@ -343,7 +361,17 @@ if __name__ == "__main__":
     save_dir = os.path.join("runs/", run_name)
     os.makedirs(save_dir, exist_ok=True)
 
-    envs = gym.vector.SyncVectorEnv([make_env(i) for i in range(config.num_envs)])
+    envs = envpool.make(config.env_id,
+                        env_type="gym",
+                        num_envs=config.num_envs,
+                        episodic_life=True,
+                        reward_clip=True,
+                        seed=config.seed)
+    envs.num_envs = config.num_envs
+    envs.single_action_space = envs.action_space
+    envs.single_observation_space = envs.observation_space
+    envs = RecordEpisodeStatistics(envs)
+    assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = Agent(envs).to(config.device)
     optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)

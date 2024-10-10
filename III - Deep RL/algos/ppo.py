@@ -2,6 +2,13 @@
 Proximal Policy Optimization (PPO) algorithm
 with Generalized Advantage Estimation (GAE)
 
+TODOS:
+-Migration to gymnasium==1.0.0
+
+Notes:
+-works with gymnasium==0.29.1
+-this implementations supposes than environments terminate but not truncate
+
 implementation details:
 https://arxiv.org/abs/2005.12729
 https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
@@ -90,7 +97,7 @@ class Config:
     save_ckpt: bool = False
     """ whether or not to save the agent in a .pth file at the end of training """
 
-    capture_video: bool = True
+    capture_video: bool = False
     """ whether or not to record interactions during training """
     capture_interval: int = 20_000
     """ number of total timesteps in between the recordings """
@@ -226,7 +233,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     A nice way to compute it is to start from the end by first computing the last delta_T
     and then add to it delta_{T-1}, delta_{T-2} etc, but each time decaying the advantage by gamma*lambda
     """
-    b_adv = torch.zeros(config.num_steps, config.num_envs)
+    b_adv = torch.zeros(config.num_steps, config.num_envs).to(config.device)
     gae = 0
 
     next_value = next_value
@@ -267,7 +274,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
 
     #ent = []
     clipfracs = []
-    kls = []
+    #kls = []
 
     for _ in range(config.num_epochs):
         indices = torch.randperm(config.num_steps)
@@ -320,7 +327,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
             optim.zero_grad()
 
             #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
-            kls.append(approx_kl)
+            #kls.append(approx_kl) # TODO warning with torch.compile/cuda graphs
 
         if config.max_kl is not None and approx_kl > config.max_kl:
             break
@@ -328,7 +335,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-    return explained_var, np.mean(kls), clipfracs
+    return explained_var, np.mean([0]), clipfracs
 
 if __name__ == "__main__":
     config = tyro.cli(Config)
