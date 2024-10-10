@@ -13,7 +13,6 @@ PPO check : 400 episodic return in breakout
 
 # TODO
 # pistes d'améliorations:
-# multi envs?
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
 # mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # leanrl version (torch compile & cuda graphs)
@@ -43,9 +42,9 @@ class Config:
     # todo : remettre valeurs : total_timesteps : 250_000, num_steps : 5_000
     total_timesteps: int = 100_000
     """ total number of timesteps collected for the training """
-    num_steps: int = 2_000
+    num_steps: int = 1_000
     """ number of steps per rollout (between updates) """
-    num_envs: int = 1
+    num_envs: int = 2
     """ number of parallel envs used at each rollout """
     
     num_epochs: int = 10
@@ -82,7 +81,7 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    log_wandb: bool = True
+    log_wandb: bool = False
 
     device: str = "cpu"
 
@@ -154,22 +153,22 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     collect num_steps timesteps of experience in the environment
     """
 
-    b_observations = torch.zeros((config.num_steps,) + envs.single_observation_space.shape).to(config.device)
-    b_actions = torch.zeros((config.num_steps,) + envs.single_action_space.shape).to(config.device)
-    b_logp = torch.zeros((config.num_steps,)).to(config.device)
-    b_rewards = torch.zeros(config.num_steps).to(config.device)
-    b_dones = torch.zeros(config.num_steps).to(config.device)
-    b_values = torch.zeros(config.num_steps).to(config.device)
+    b_observations = torch.zeros((config.num_steps, config.num_envs) + envs.single_observation_space.shape).to(config.device)
+    b_actions = torch.zeros((config.num_steps, config.num_envs) + envs.single_action_space.shape).to(config.device)
+    b_logp = torch.zeros((config.num_steps, config.num_envs)).to(config.device)
+    b_rewards = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+    b_dones = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+    b_values = torch.zeros(config.num_steps, config.num_envs).to(config.device)
 
-    # next_obs  : (1, obs_dim)
-    # next_done : (1,)
-    # action    : (1, action_dim)
-    # reward    : (1,)
+    # next_obs  : (num_envs, obs_dim)
+    # next_done : (num_envs,)
+    # action    : (num_envs, action_dim) (with action_dim=() possible)
+    # reward    : (num_envs,)
 
     if next_obs is None:
         next_obs, _ = envs.reset(seed=config.seed)
         next_obs = torch.Tensor(next_obs).to(config.device)
-        next_done = torch.ones(1)
+        next_done = torch.ones(config.num_envs).to(config.device)
         avg_returns = deque(maxlen=20)
         avg_lengths = deque(maxlen=20)
 
@@ -188,18 +187,20 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
         b_actions[t] = action
         b_logp[t] = logp
         b_rewards[t] = torch.tensor(reward).to(config.device)
-        b_values[t] = value
+        b_values[t] = value.flatten() # value was (num_envs, 1)
 
         if "final_info" in infos:
             for info in infos["final_info"]:
-                r = float(info["episode"]["r"].reshape(()))
-                l = float(info["episode"]["l"].reshape(()))
-                avg_returns.append(r)
-                avg_lengths.append(l)
+                if info is not None:
+                    r = float(info["episode"]["r"].reshape(()))
+                    l = float(info["episode"]["l"].reshape(()))
+                    avg_returns.append(r)
+                    avg_lengths.append(l)
 
     # bootstrap final step
     with torch.no_grad():
         next_value = agent.get_value(next_obs)
+        next_value = next_value.flatten()
     
     """
     GAE advantage computation : A_t = sum_{l=0} (gamma*lambda)^l delta_{t+l}
@@ -207,7 +208,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
     A nice way to compute it is to start from the end by first computing the last delta_T
     and then add to it delta_{T-1}, delta_{T-2} etc, but each time decaying the advantage by gamma*lambda
     """
-    b_adv = torch.zeros(config.num_steps)
+    b_adv = torch.zeros(config.num_steps, config.num_envs)
     gae = 0
 
     next_value = next_value
@@ -221,6 +222,15 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None):
         next_nonterminal = 1.0 - b_dones[t]
 
     b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
+
+    # todo : view?
+    # flatten parallel env data into a single stream
+    b_observations = b_observations.reshape((-1,) + envs.single_observation_space.shape)
+    b_actions = b_actions.reshape((-1,) + envs.single_action_space.shape)
+    b_logp = b_logp.reshape(-1)
+    b_adv = b_adv.reshape(-1)
+    b_values = b_values.reshape(-1)
+    b_returns = b_returns.reshape(-1)
 
     return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths
 
