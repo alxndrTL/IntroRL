@@ -2,6 +2,7 @@
 Proximal Policy Optimization (PPO) algorithm
 with Generalized Advantage Estimation (GAE)
 
+implementation details:
 https://arxiv.org/abs/2005.12729
 https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
 
@@ -10,12 +11,13 @@ PPO check : 400 episodic return in breakout
 
 # TODO
 # pistes d'améliorations:
-# script de test d'un agent entraîné (pas forcément en rendering, paramètre)
 # leanrl version (torch compile & cuda graphs)
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
- 
+
+import os
 from dataclasses import dataclass
 from typing import Optional
+import string
 from collections import deque
 import time
 import wandb
@@ -78,22 +80,38 @@ class Config:
     max_grad_norm: float = 0.5
     """ max grad norm during training """
 
-    log_wandb: bool = False
-
     device: str = "cpu"
 
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
 
-def make_env(env_id, gamma):
+    log_wandb: bool = False
+    
+    save_ckpt: bool = False
+    """ whether or not to save the agent in a .pth file at the end of training """
+
+    capture_video: bool = True
+    """ whether or not to record interactions during training """
+    capture_interval: int = 20_000
+    """ number of total timesteps in between the recordings """
+    capture_length: int = 0
+    """ video length for each recording """
+
+def make_env(idx):
     def thunk():
-        env = gym.make(env_id)
+        if config.capture_video and idx == 0:
+            env = gym.make(config.env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, video_folder=f"videos/{run_name}", name_prefix="training", 
+                                           step_trigger=lambda i: i % (config.capture_interval//config.num_envs) == 0,
+                                           video_length=config.capture_length, disable_logger=True)
+        else:
+            env = gym.make(config.env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         #env = gym.wrappers.ClipAction(env) # only for Box action spaces
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.NormalizeReward(env, gamma=config.gae_gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
     return thunk
@@ -321,22 +339,20 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
     
     if config.log_wandb:
-        wandb.init(project="ppo", config={
-            "algo": "ppo",
-            "source": "mine",
-            "env_id": config.env_id,
-            "total_timesteps": config.total_timesteps,
-            "step_per_rollout": config.num_steps,
-            "lr": config.lr,
-            "vf_coef": config.vf_coef,
-            "gae_gamma": config.gae_gamma,
-            "gae_lambda": config.gae_lambda,
-        })
+        wandb.init(project="ppo", config={"algo": "ppo", **vars(config)},)
+        run_name = wandb.run.name
+    else:
+        run_name = ''.join(random.choice(string.ascii_letters) for _ in range(8))
 
-    envs = gym.vector.SyncVectorEnv([make_env(config.env_id, config.gae_gamma) for i in range(config.num_envs)])
+    save_dir = os.path.join("runs/", run_name)
+    os.makedirs(save_dir, exist_ok=True)
 
-    agent = Agent(envs)
+    envs = gym.vector.SyncVectorEnv([make_env(i) for i in range(config.num_envs)])
+
+    agent = Agent(envs).to(config.device)
     optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)
+
+    print(f"Run {run_name} starting.")
     
     total_steps = config.total_timesteps // config.num_steps
 
@@ -377,3 +393,8 @@ if __name__ == "__main__":
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
                        step=(step+1)*config.num_steps)
+    
+    envs.close()
+
+    if config.save_ckpt:
+        torch.save({"model": agent.state_dict(), "config": vars(config)}, os.path.join(save_dir, "agent.pth"))

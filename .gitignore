@@ -1,3 +1,5 @@
 env/
 wandb/
 __pycache__/
+runs/
+videos/
