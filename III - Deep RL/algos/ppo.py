@@ -22,8 +22,10 @@ PPO check : 400 episodic return in breakout
 # re comparer avec ppo_leanrl avec des HPs différents (adv norm, clip VF loss...)
  
 from dataclasses import dataclass
+from typing import Optional
 from collections import deque
 import wandb
+import tyro
 import random
 import numpy as np
 
@@ -68,7 +70,7 @@ class Config:
     anneal_lr: bool = True
     """ whether or not to anneal the LR throughout training """
 
-    max_kl: float = None
+    max_kl: Optional[float] = None
     """ threshold for the KL div between old and new policy. Above this, the current update stops. """
 
     gae_gamma: float = 0.99
@@ -312,8 +314,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     return explained_var, np.mean(kls), clipfracs
 
 if __name__ == "__main__":
-    # 2_000/2^-5, 500/2^-6
-    config = Config()
+    config = tyro.cli(Config)
 
     random.seed(config.seed)
     np.random.seed(config.seed)
