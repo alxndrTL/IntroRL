@@ -14,7 +14,7 @@ PPO check : 400 episodic return in breakout
 # TODO
 # pistes d'améliorations:
 # script de test d'un agent entraîné (pas forcément en rendering, paramètre)
-# mettre en place pipeline de test (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
+# mettre en place pipeline de training/comparaison (avec notamment tyro pour lancer depuis la cmd line) et reflechir a comment mettre en place cela (wandb? etc) (commun à tous les algos!!)
 # leanrl version (torch compile & cuda graphs)
 
 # reprendre wandb typo de leanRL

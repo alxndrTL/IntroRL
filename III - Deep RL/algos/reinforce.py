@@ -6,6 +6,7 @@ only works with 1 env
 
 from dataclasses import dataclass
 import wandb
+import tyro
 import numpy as np
 
 import gymnasium as gym
@@ -133,7 +134,7 @@ def update(obs, actions, rtg):
     optim.zero_grad()
 
 if __name__ == "__main__":
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), gamma=0.99, log_wandb=True, device="cpu")
+    config = tyro.cli(Config)
     
     if config.log_wandb:
         wandb.init(project="reinforce", config={

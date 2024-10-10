@@ -130,7 +130,7 @@ def update(obs, actions, returns):
     optim.zero_grad()
 
 if __name__ == "__main__":
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=500, pi_lr=2**(-6), log_wandb=True, device="cpu")
+    config = tyro.cli(Config)
     
     if config.log_wandb:
         wandb.init(project="spg", config={

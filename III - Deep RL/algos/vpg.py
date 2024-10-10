@@ -7,6 +7,7 @@ only works with 1 env
 
 from dataclasses import dataclass
 import wandb
+import tyro
 import numpy as np
 
 import gymnasium as gym
@@ -179,9 +180,7 @@ def update(obs, actions, adv, rets):
 
 if __name__ == "__main__":
     # 2_000/2^-5, 500/2^-6
-    config = Config(env_id='CartPole-v1', total_timesteps=100_000, num_steps=2_000,
-                    lr=2**(-5), vf_coef=0.5, gae_gamma=0.99, gae_lambda=0.97,
-                    log_wandb=False, device="cpu")
+    config = tyro.cli(Config)
     
     if config.log_wandb:
         wandb.init(project="vpg", config={
