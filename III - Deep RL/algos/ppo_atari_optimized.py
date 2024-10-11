@@ -25,9 +25,17 @@ import gym
 
 import torch
 import torch.nn as nn
-from torch.distributions.categorical import Categorical
+from torch.distributions.categorical import Categorical, Distribution
+
+import tensordict
+from tensordict import from_module
+from tensordict.nn import CudaGraphModule
 
 from misc import format_time
+
+os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = 1
+Distribution.set_default_validate_args(False)
+torch.set_float32_matmul_precision("high")
 
 @dataclass
 class Config:
@@ -77,6 +85,8 @@ class Config:
     """ max grad norm during training """
 
     device: str = "cuda"
+    compile: bool = False
+    cudagraphs: bool = False
 
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
@@ -185,12 +195,13 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
     collect num_steps timesteps of experience in the environment
     """
 
-    b_observations = torch.zeros((config.num_steps, config.num_envs) + envs.single_observation_space.shape).to(config.device)
-    b_actions = torch.zeros((config.num_steps, config.num_envs) + envs.single_action_space.shape).to(config.device)
-    b_logp = torch.zeros((config.num_steps, config.num_envs)).to(config.device)
-    b_rewards = torch.zeros(config.num_steps, config.num_envs).to(config.device)
-    b_dones = torch.zeros(config.num_steps, config.num_envs).to(config.device)
-    b_values = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+    ts = []
+    #b_observations = torch.zeros((config.num_steps, config.num_envs) + envs.single_observation_space.shape).to(config.device)
+    #b_actions = torch.zeros((config.num_steps, config.num_envs) + envs.single_action_space.shape).to(config.device)
+    #b_logp = torch.zeros((config.num_steps, config.num_envs)).to(config.device)
+    #b_rewards = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+    #b_dones = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+    #b_values = torch.zeros(config.num_steps, config.num_envs).to(config.device)
 
     # next_obs  : (num_envs, obs_dim)
     # next_done : (num_envs,)
@@ -205,20 +216,19 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
         avg_lengths = deque(maxlen=20)
 
     for t in range(config.num_steps):
-        b_observations[t] = next_obs
-        b_dones[t] = next_done
+        #b_observations[t] = next_obs
+        #b_dones[t] = next_done
 
-        with torch.no_grad():
-            action, logp, _, value = agent.get_action_value(next_obs)
+        action, logp, _, value = policy(next_obs)
 
         # env step (if done, next_obs is the obs of the new episode)
         next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
-        next_obs, next_done = torch.Tensor(next_obs).to(config.device), torch.Tensor(next_done).to(config.device)
+        next_obs, reward, next_done = torch.as_tensor(next_obs), torch.as_tensor(reward), torch.as_tensor(next_done)
 
-        b_actions[t] = action
-        b_logp[t] = logp
-        b_rewards[t] = torch.tensor(reward).to(config.device)
-        b_values[t] = value.flatten() # value was (num_envs, 1)
+        #b_actions[t] = action
+        #b_logp[t] = logp
+        #b_rewards[t] = torch.tensor(reward).to(config.device)
+        #b_values[t] = value.flatten() # value was (num_envs, 1)
 
         for idx, d in enumerate(next_done):
             if d and infos["lives"][idx] == 0:
@@ -227,45 +237,72 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
                 l = float(infos["l"][idx])
                 avg_returns.append(r)
                 avg_lengths.append(l)
-
-    # bootstrap final step
-    with torch.no_grad():
-        next_value = agent.get_value(next_obs).flatten()
     
+        ts.append(tensordict.TensorDict._new_unsafe(
+            obs=obs,
+            dones=done,
+            actions=action,
+            logp=logp,
+            rewards=reward,
+            vals=value.flatten(),
+            batch_size=(config.num_envs,),
+        ))
+
+        obs = next_obs = next_obs.to(config.device, non_blocking=True)
+        done = next_done.to(config.device, non_blocking=True)
+    
+    container = torch.stack(ts, 0).to(config.device)
+    return next_obs, done, container, avg_returns, avg_lengths, max_ret
+
+    # todo : view?
+    # flatten parallel env data into a single stream
+    #b_observations = b_observations.reshape((-1,) + envs.single_observation_space.shape)
+    #b_actions = b_actions.reshape((-1,) + envs.single_action_space.shape)
+    #b_logp = b_logp.reshape(-1)
+    #b_adv = b_adv.reshape(-1)
+    #b_values = b_values.reshape(-1)
+    #b_returns = b_returns.reshape(-1)
+
+    #return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths, max_ret
+
+def gae(next_obs, next_done, container):
     """
     GAE advantage computation : A_t = sum_{l=0} (gamma*lambda)^l delta_{t+l}
     (where delta_t = r_t + gamma V(s_{t+1}) - V(s_t))
     A nice way to compute it is to start from the end by first computing the last delta_T
     and then add to it delta_{T-1}, delta_{T-2} etc, but each time decaying the advantage by gamma*lambda
     """
-    b_adv = torch.zeros(config.num_steps, config.num_envs).to(config.device)
+
+    # bootstrap final step
+    next_value = get_value(next_obs).flatten()
+    
+    b_nextnonterminals = (~container['dones']).float().unbind(0)
+    b_values = container['values']
+    b_values_unbind = b_values.unbind(0)
+    b_rewards = container['rewards'].unbind(0)
+
+    b_adv = []
     gae = 0
 
     next_value = next_value
-    next_nonterminal = 1.0 - next_done
+    next_nonterminal = (~next_done).float()
     for t in reversed(range(config.num_steps)):
-        delta = b_rewards[t] + next_nonterminal * config.gae_gamma * next_value - b_values[t]
+        delta = b_rewards[t] + next_nonterminal * config.gae_gamma * next_value - b_values_unbind[t]
         gae = delta + next_nonterminal * config.gae_gamma * config.gae_lambda * gae
-        b_adv[t] = gae
+        b_adv.append(gae)
 
-        next_value = b_values[t]
-        next_nonterminal = 1.0 - b_dones[t]
+        next_value = b_values_unbind[t]
+        next_nonterminal = b_nextnonterminals[t]
+        
+    b_adv = container['advantages'] = torch.stack(list(reversed(b_adv)))
+    container['returns'] = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
-    b_returns = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
+    return container
 
-    # todo : view?
-    # flatten parallel env data into a single stream
-    b_observations = b_observations.reshape((-1,) + envs.single_observation_space.shape)
-    b_actions = b_actions.reshape((-1,) + envs.single_action_space.shape)
-    b_logp = b_logp.reshape(-1)
-    b_adv = b_adv.reshape(-1)
-    b_values = b_values.reshape(-1)
-    b_returns = b_returns.reshape(-1)
-
-    return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths, max_ret
-
-def update(obs, actions, old_logp, adv, old_values, rets):
+def update(b_obs, b_actions, b_old_logp, b_adv, b_old_values, b_rets):
     """
+    TODO update comments
+
     obs: (B, obs_dim)
     actions: (B, action_dim)
     old_logp: (B,)
@@ -277,65 +314,57 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
     """
 
-    #ent = []
-    clipfracs = []
-    #kls = []
+    _, b_logp, b_entropy, b_values = agent.get_action_value(b_obs, action=b_actions)
 
-    for _ in range(config.num_epochs):
-        indices = torch.randperm(config.num_steps*config.num_envs)
-        for start in range(0, config.num_steps*config.num_envs, config.batch_size):
-            end = start + config.batch_size
-            idx_batch = indices[start:end]
+    if config.normalize_adv:
+        b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
-            b_obs = obs[idx_batch]
-            b_actions = actions[idx_batch]
-            b_old_logp = old_logp[idx_batch]
-            b_rets = rets[idx_batch]
-            b_adv = adv[idx_batch]
-            b_old_values = old_values[idx_batch]
-        
-            _, b_logp, b_entropy, b_values = agent.get_action_value(b_obs, action=b_actions)
+    # policy loss
+    log_ratio = b_logp - b_old_logp
+    ratio = torch.exp(log_ratio)
+    clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
+    loss_pi = -torch.min(ratio * b_adv, clip_adv).mean()
 
-            if config.normalize_adv:
-                b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
-
-            # policy loss
-            log_ratio = b_logp - b_old_logp
-            ratio = torch.exp(log_ratio)
-            clip_adv = torch.clamp(ratio, 1-config.clip_ratio, 1+config.clip_ratio) * b_adv
-            loss_pi = -torch.min(ratio * b_adv, clip_adv).mean()
-
-            with torch.no_grad():
-                approx_kl = ((ratio - 1) - log_ratio).mean() # (http://joschu.net/blog/kl-approx.html)
-                clipfracs.append(((ratio - 1.0).abs() > config.clip_ratio).float().mean().item())
+    with torch.no_grad():
+        approx_kl = ((ratio - 1) - log_ratio).mean() # (http://joschu.net/blog/kl-approx.html)
+        clipfrac = ((ratio - 1.0).abs() > config.clip_ratio).float().mean()
             
-            # value loss (0.5 is to ensure same vf_coef as with other implementations)
-            b_values = b_values.view(-1)
-            if config.clip_loss_vf:
-                loss_vf_unclipped = (b_rets - b_values)**2
+    # value loss (0.5 is to ensure same vf_coef as with other implementations)
+    b_values = b_values.view(-1)
+    if config.clip_loss_vf:
+        loss_vf_unclipped = (b_rets - b_values)**2
 
-                b_values_clipped = b_old_values + torch.clamp(b_values - b_old_values, -config.clip_ratio, +config.clip_ratio)
-                loss_vf_clipped = (b_rets - b_values_clipped)**2
+        b_values_clipped = b_old_values + torch.clamp(b_values - b_old_values, -config.clip_ratio, +config.clip_ratio)
+        loss_vf_clipped = (b_rets - b_values_clipped)**2
 
-                loss_vf = 0.5 * torch.max(loss_vf_unclipped, loss_vf_clipped).mean()
-            else:
-                loss_vf = 0.5 * ((b_rets - b_values)**2).mean()
+        loss_vf = 0.5 * torch.max(loss_vf_unclipped, loss_vf_clipped).mean()
+    else:
+        loss_vf = 0.5 * ((b_rets - b_values)**2).mean()
 
-            # entropy loss
-            loss_ent = b_entropy.mean()
+    # entropy loss
+    loss_ent = b_entropy.mean()
             
-            # total update
-            loss = loss_pi + config.vf_coef * loss_vf - config.ent_coef * loss_ent
-            loss.backward()
-            _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
-            optim.step()
-            optim.zero_grad()
+    # total update
+    loss = loss_pi + config.vf_coef * loss_vf - config.ent_coef * loss_ent
+    loss.backward()
+    _ = nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
+    optim.step()
+    optim.zero_grad()
 
-            #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
-            #kls.append(approx_kl)
+    #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
+    #kls.append(approx_kl)
 
-        if config.max_kl is not None and approx_kl > config.max_kl:
-            break
+    return approx_kl, clipfrac # todo : more losses ? etc (see line 272)
+
+update = tensordict.nn.TensorDictModule(
+    update,
+    in_keys=['b_obs', 'b_actions', 'b_old_logp', 'b_adv', 'b_old_values', 'b_rets'],
+    out_keys=['approx_kl', 'clipfrac']
+)
+
+def update(obs, actions, old_logp, adv, old_values, rets):
+
+    
             
     y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
     var_y = np.var(y_true)
@@ -372,7 +401,26 @@ if __name__ == "__main__":
     assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = Agent(envs).to(config.device)
-    optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5)
+
+    agent_inference = Agent(envs).to(config.device)
+    agent_inference_params = from_module(agent).data
+    agent_inference_params.to_module(agent_inference)
+
+    optim = torch.optim.Adam(agent.parameters(), lr=config.lr, eps=1e-5, capturable=config.cudagraphs and not config.compile)
+
+    # define executables
+    policy = agent_inference.get_action_value
+    get_value = agent_inference.get_value
+
+    if config.compile:
+        policy = torch.compile(policy)
+        gae = torch.compile(gae)
+        update = torch.compile(update)
+    
+    if config.cudagraphs:
+        policy = CudaGraphModule(policy)
+        gae = CudaGraphModule(gae)
+        update = CudaGraphModule(update)
 
     print(f"Run {run_name} starting.")
     
@@ -388,8 +436,23 @@ if __name__ == "__main__":
     for step in range(total_steps):
         t0 = time.time()
 
-        next_obs, next_done, obs, actions, old_logp, adv, old_values, rets, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
-        explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
+        torch.compiler.cudagraph_mark_step_begin()
+        next_obs, next_done, obs, container, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
+        #explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
+
+        container = gae(next_obs, next_done, container)
+        container_flat = container.view(-1)
+
+        clipfracs = []
+
+        for _ in range(config.num_epochs):
+            b_inds = torch.randperm(container_flat.shape[0], device=config.device).split(config.batch_size)
+            for b in b_inds:
+                container_local = container_flat[b]
+                out = update(container_flat, tensordict_out=tensordict.TensorDict())
+            
+            if config.max_kl is not None and out['approx_kl'] > config.max_kl:
+                break
 
         t1 = time.time()
 
