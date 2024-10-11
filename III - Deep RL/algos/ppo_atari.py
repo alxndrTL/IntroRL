@@ -81,7 +81,7 @@ class Config:
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
 
-    log_wandb: bool = True
+    log_wandb: bool = False
     
     save_ckpt: bool = False
     """ whether or not to save the agent in a .pth file at the end of training """

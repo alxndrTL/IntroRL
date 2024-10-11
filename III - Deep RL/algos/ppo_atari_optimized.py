@@ -33,7 +33,7 @@ from tensordict.nn import CudaGraphModule
 
 from misc import format_time
 
-os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = 1
+os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 Distribution.set_default_validate_args(False)
 torch.set_float32_matmul_precision("high")
 
@@ -86,12 +86,12 @@ class Config:
 
     device: str = "cuda"
     compile: bool = False
-    cudagraphs: bool = False
+    cudagraphs: bool = True
 
     measure_burnin: int = 3
     """ number of steps to skip at the beginning before tracking speed """
 
-    log_wandb: bool = True
+    log_wandb: bool = False
     
     save_ckpt: bool = False
     """ whether or not to save the agent in a .pth file at the end of training """
@@ -190,7 +190,7 @@ class Agent(nn.Module):
         
         return action, logp, ent, self.critic(hidden)
 
-def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, max_ret=0):
+def rollout(obs=None, done=None, avg_returns=None, avg_lengths=None, max_ret=0):
     """
     collect num_steps timesteps of experience in the environment
     """
@@ -208,10 +208,9 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
     # action    : (num_envs, action_dim) (with action_dim=() possible)
     # reward    : (num_envs,)
 
-    if next_obs is None:
-        next_obs = envs.reset() # seed=config.seed)
-        next_obs = torch.Tensor(next_obs).to(config.device)
-        next_done = torch.ones(config.num_envs).to(config.device)
+    if obs is None:
+        obs = torch.tensor(envs.reset(), device=config.device, dtype=torch.uint8) # seed=config.seed)
+        done = torch.ones(config.num_envs, device=config.device, dtype=torch.bool)
         avg_returns = deque(maxlen=20)
         avg_lengths = deque(maxlen=20)
 
@@ -219,7 +218,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
         #b_observations[t] = next_obs
         #b_dones[t] = next_done
 
-        action, logp, _, value = policy(next_obs)
+        action, logp, _, value = policy(obs)
 
         # env step (if done, next_obs is the obs of the new episode)
         next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
@@ -239,12 +238,12 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
                 avg_lengths.append(l)
     
         ts.append(tensordict.TensorDict._new_unsafe(
-            obs=obs,
+            b_obs=obs,
+            b_actions=action,
             dones=done,
-            actions=action,
-            logp=logp,
+            b_old_logp=logp,
             rewards=reward,
-            vals=value.flatten(),
+            b_old_values=value.flatten(),
             batch_size=(config.num_envs,),
         ))
 
@@ -252,7 +251,7 @@ def rollout(next_obs=None, next_done=None, avg_returns=None, avg_lengths=None, m
         done = next_done.to(config.device, non_blocking=True)
     
     container = torch.stack(ts, 0).to(config.device)
-    return next_obs, done, container, avg_returns, avg_lengths, max_ret
+    return next_obs, done, container, avg_returns, avg_lengths, max_ret # todo : next_done
 
     # todo : view?
     # flatten parallel env data into a single stream
@@ -275,9 +274,10 @@ def gae(next_obs, next_done, container):
 
     # bootstrap final step
     next_value = get_value(next_obs).flatten()
-    
+
+    #print(container['dones'])
     b_nextnonterminals = (~container['dones']).float().unbind(0)
-    b_values = container['values']
+    b_values = container['b_old_values']
     b_values_unbind = b_values.unbind(0)
     b_rewards = container['rewards'].unbind(0)
 
@@ -294,8 +294,8 @@ def gae(next_obs, next_done, container):
         next_value = b_values_unbind[t]
         next_nonterminal = b_nextnonterminals[t]
         
-    b_adv = container['advantages'] = torch.stack(list(reversed(b_adv)))
-    container['returns'] = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
+    b_adv = container['b_adv'] = torch.stack(list(reversed(b_adv)))
+    container['b_rets'] = b_adv + b_values # adv = q - v so adv + v = q (with q being a mix of n-step returns)
 
     return container
 
@@ -362,6 +362,7 @@ update = tensordict.nn.TensorDictModule(
     out_keys=['approx_kl', 'clipfrac']
 )
 
+"""
 def update(obs, actions, old_logp, adv, old_values, rets):
 
     
@@ -370,6 +371,7 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
     return explained_var, np.mean([0]), clipfracs
+"""
 
 if __name__ == "__main__":
     config = tyro.cli(Config)
@@ -437,7 +439,7 @@ if __name__ == "__main__":
         t0 = time.time()
 
         torch.compiler.cudagraph_mark_step_begin()
-        next_obs, next_done, obs, container, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
+        next_obs, next_done, container, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
         #explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
 
         container = gae(next_obs, next_done, container)
@@ -476,7 +478,7 @@ if __name__ == "__main__":
         if config.log_wandb:
             wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
                        "returns_std": np.std(avg_returns), "lengths_std": np.std(avg_lengths),
-                       "explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
+                       #"explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
                        step=(step+1)*config.num_steps*config.num_envs)
