@@ -207,20 +207,12 @@ def rollout(obs=None, done=None, avg_returns=None, avg_lengths=None, max_ret=0):
         avg_returns = deque(maxlen=20)
         avg_lengths = deque(maxlen=20)
 
-    for t in range(config.num_steps):
-        #b_observations[t] = next_obs
-        #b_dones[t] = next_done
-
+    for _ in range(config.num_steps):
         action, logp, _, value = policy(obs)
 
         # env step (if done, next_obs is the obs of the new episode)
         next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
         next_obs, reward, next_done = torch.as_tensor(next_obs), torch.as_tensor(reward), torch.as_tensor(next_done)
-
-        #b_actions[t] = action
-        #b_logp[t] = logp
-        #b_rewards[t] = torch.tensor(reward).to(config.device)
-        #b_values[t] = value.flatten() # value was (num_envs, 1)
 
         for idx, d in enumerate(next_done):
             if d and infos["lives"][idx] == 0:
