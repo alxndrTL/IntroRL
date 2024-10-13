@@ -41,7 +41,7 @@ torch.set_float32_matmul_precision("high")
 class Config:
     env_id: str = "Breakout-v5"
 
-    seed: int = 1
+    seed: int = 0
 
     total_timesteps: int = 10_000_000
     """ total number of timesteps collected for the training """
@@ -202,7 +202,7 @@ def rollout(obs=None, done=None, avg_returns=None, avg_lengths=None, max_ret=0):
     # reward    : (num_envs,)
 
     if obs is None:
-        obs = torch.tensor(envs.reset(), device=config.device, dtype=torch.uint8) # seed=config.seed)
+        obs = torch.tensor(envs.reset(), device=config.device, dtype=torch.uint8)
         done = torch.ones(config.num_envs, device=config.device, dtype=torch.bool)
         avg_returns = deque(maxlen=20)
         avg_lengths = deque(maxlen=20)
@@ -244,18 +244,7 @@ def rollout(obs=None, done=None, avg_returns=None, avg_lengths=None, max_ret=0):
         done = next_done.to(config.device, non_blocking=True)
     
     container = torch.stack(ts, 0).to(config.device)
-    return next_obs, done, container, avg_returns, avg_lengths, max_ret # todo : next_done
-
-    # todo : view?
-    # flatten parallel env data into a single stream
-    #b_observations = b_observations.reshape((-1,) + envs.single_observation_space.shape)
-    #b_actions = b_actions.reshape((-1,) + envs.single_action_space.shape)
-    #b_logp = b_logp.reshape(-1)
-    #b_adv = b_adv.reshape(-1)
-    #b_values = b_values.reshape(-1)
-    #b_returns = b_returns.reshape(-1)
-
-    #return next_obs, next_done, b_observations, b_actions, b_logp, b_adv, b_values, b_returns, avg_returns, avg_lengths, max_ret
+    return next_obs, done, container, avg_returns, avg_lengths, max_ret
 
 def gae(next_obs, next_done, container):
     """
@@ -268,11 +257,10 @@ def gae(next_obs, next_done, container):
     # bootstrap final step
     next_value = get_value(next_obs).flatten()
 
-    # todo : unbind ??
-    b_nextnonterminals = (~container['dones']).float().unbind(0)
-    b_values = container['b_old_values']
-    b_values_unbind = b_values.unbind(0)
-    b_rewards = container['rewards'].unbind(0)
+    b_nextnonterminals = (~container['dones']).float().unbind(0) # tuple of num_steps (num_envs,) tensors
+    b_values = container['b_old_values'] # (num_steps, num_envs)
+    b_values_unbind = b_values.unbind(0) # tuple of num_steps (num_envs,) tensors
+    b_rewards = container['rewards'].unbind(0) # tuple of num_steps (num_envs,) tensors
 
     b_adv = []
     gae = 0
@@ -294,17 +282,17 @@ def gae(next_obs, next_done, container):
 
 def update(b_obs, b_actions, b_old_logp, b_adv, b_old_values, b_rets):
     """
-    TODO update comments
+    perform one step of update on both the actor and the critic
 
-    obs: (B, obs_dim)
-    actions: (B, action_dim)
-    old_logp: (B,)
-    adv: (B,)
-    old_values: (B,)
-    rets: (B,)
+    b_obs: (B, obs_dim)
+    b_actions: (B, action_dim)
+    b_old_logp: (B,)
+    b_adv: (B,)
+    b_old_values: (B,)
+    b_rets: (B,)
 
-    all these are supposed to be collected in a rollout phase
-    here, "old_" means that it has been computed by the previous policy (theta_old) (and there is no gradient attached to it)
+    here B is the batch size.
+    this should be called inside a double for loop (over epochs and batches)
     """
 
     _, b_logp, b_entropy, b_values = agent.get_action_value(b_obs, action=b_actions)
@@ -344,34 +332,22 @@ def update(b_obs, b_actions, b_old_logp, b_adv, b_old_values, b_rets):
     optim.step()
     optim.zero_grad()
 
-    #ent.append(loss_ent.detach()) # TODO warning with torch.compile/cuda graphs
-    #kls.append(approx_kl)
-
-    return approx_kl, clipfrac # todo : more losses ? etc (see line 272)
+    return approx_kl, clipfrac, loss_ent.detach()
 
 update = tensordict.nn.TensorDictModule(
     update,
     in_keys=['b_obs', 'b_actions', 'b_old_logp', 'b_adv', 'b_old_values', 'b_rets'],
-    out_keys=['approx_kl', 'clipfrac']
+    out_keys=['approx_kl', 'clipfrac', 'loss_ent']
 )
-
-"""
-def update(obs, actions, old_logp, adv, old_values, rets):
-
-    
-            
-    y_pred, y_true = old_values.cpu().numpy(), rets.cpu().numpy()
-    var_y = np.var(y_true)
-    explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-    return explained_var, np.mean([0]), clipfracs
-"""
 
 if __name__ == "__main__":
     config = tyro.cli(Config)
 
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-    torch.manual_seed(config.seed)
+    seed = 123456789 + config.seed
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     
     if config.log_wandb:
@@ -433,21 +409,30 @@ if __name__ == "__main__":
 
         torch.compiler.cudagraph_mark_step_begin()
         next_obs, next_done, container, avg_returns, avg_lengths, max_ret = rollout(next_obs, next_done, avg_returns, avg_lengths, max_ret)
-        #explained_var, mean_kl, clipfracs = update(obs, actions, old_logp, adv, old_values, rets)
 
         container = gae(next_obs, next_done, container)
-        container_flat = container.view(-1)
+        container_flat = container.view(-1) # flatten num_steps and num_envs
 
         clipfracs = []
+        ents = []
+        kls = []
 
         for _ in range(config.num_epochs):
             b_inds = torch.randperm(container_flat.shape[0], device=config.device).split(config.batch_size)
             for b in b_inds:
                 container_local = container_flat[b]
                 out = update(container_flat, tensordict_out=tensordict.TensorDict())
+
+                clipfracs.append(out['clipfrac'])
+                ents.append(out['loss_ent'])
+                kls.append(out['approx_kl'])
             
             if config.max_kl is not None and out['approx_kl'] > config.max_kl:
                 break
+        
+        y_pred, y_true = container_flat['b_old_values'].cpu().numpy(), container_flat['b_rets'].cpu().numpy()
+        var_y = np.var(y_true)
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         t1 = time.time()
 
@@ -471,7 +456,7 @@ if __name__ == "__main__":
         if config.log_wandb:
             wandb.log({"returns": np.mean(avg_returns), "lengths": np.mean(avg_lengths),
                        "returns_std": np.std(avg_returns), "lengths_std": np.std(avg_lengths),
-                       #"explained_var": explained_var, "mean_kl": mean_kl, "clipfracs": np.mean(clipfracs),
+                       "explained_var": explained_var, "mean_kl": np.mean(kls), "clipfracs": np.mean(clipfracs), "entropy": np.mean(ents),
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
                        step=(step+1)*config.num_steps*config.num_envs)
