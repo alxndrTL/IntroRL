@@ -277,8 +277,8 @@ def update(obs, actions, old_logp, adv, old_values, rets):
     #kls = []
 
     for _ in range(config.num_epochs):
-        indices = torch.randperm(config.num_steps)
-        for start in range(0, 1 * config.num_steps, config.batch_size):
+        indices = torch.randperm(config.num_steps*config.num_envs)
+        for start in range(0, config.num_steps*config.num_envs, config.batch_size):
             end = start + config.batch_size
             idx_batch = indices[start:end]
 
@@ -384,7 +384,7 @@ if __name__ == "__main__":
 
         # printing and logging
         uptime = time.time() - start_time
-        total_time = ((total_steps*config.num_steps) * uptime) / ((step+1) * config.num_steps)
+        total_time = ((total_steps*config.num_steps*config.num_envs) * uptime) / ((step+1)*config.num_steps*config.num_envs)
         eta = total_time - uptime
 
         timesteps_per_s = config.num_steps*config.num_envs / (t1-t0)
