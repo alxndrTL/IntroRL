@@ -41,7 +41,7 @@ torch.set_float32_matmul_precision("high")
 class Config:
     env_id: str = "Breakout-v5"
 
-    seed: int = 0
+    seed: int = 2
 
     total_timesteps: int = 10_000_000
     """ total number of timesteps collected for the training """
@@ -93,8 +93,10 @@ class Config:
 
     log_wandb: bool = False
     
+    ckpt_interval: int = 2_000_000
+    """ interval between two checkpoints (in number of timesteps) """
     save_ckpt: bool = False
-    """ whether or not to save the agent in a .pth file at the end of training """
+    """ whether or not to save the agent in a .pth file at the end of training (independent of ckpt_interval) """
 
 class RecordEpisodeStatistics(gym.Wrapper):
     def __init__(self, env, deque_size=100):
@@ -452,8 +454,15 @@ if __name__ == "__main__":
                        "lr": optim.param_groups[0]["lr"],
                        "timesteps_per_s": timesteps_per_s},
                        step=(step+1)*config.num_steps*config.num_envs)
+            
+        if ((step+1)*config.num_steps*config.num_envs % config.ckpt_interval) == 0:
+            dirname = f"ckpt_{iter}/"
+            os.makedirs(os.path.join(save_dir, dirname), exist_ok=True)
+            checkpoint = {"model": agent_inference.state_dict(), "config": vars(config)}
+            torch.save(checkpoint, os.path.join(save_dir, dirname, "model.pth"))
     
     envs.close()
 
     if config.save_ckpt:
         torch.save({"model": agent.state_dict(), "config": vars(config)}, os.path.join(save_dir, "agent.pth"))
+        # todo : agent inference
