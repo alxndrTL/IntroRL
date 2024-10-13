@@ -88,9 +88,6 @@ class Config:
     compile: bool = False
     cudagraphs: bool = True
 
-    measure_burnin: int = 3
-    """ number of steps to skip at the beginning before tracking speed """
-
     log_wandb: bool = False
     
     ckpt_interval: int = 2_000_000
