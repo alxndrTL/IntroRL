@@ -96,13 +96,6 @@ class Config:
     save_ckpt: bool = False
     """ whether or not to save the agent in a .pth file at the end of training """
 
-    capture_video: bool = True
-    """ whether or not to record interactions during training """
-    capture_interval: int = 200_000
-    """ number of total timesteps in between the recordings """
-    capture_length: int = 0
-    """ video length for each recording """
-
 class RecordEpisodeStatistics(gym.Wrapper):
     def __init__(self, env, deque_size=100):
         super().__init__(env)
@@ -142,22 +135,22 @@ def layer_init(layer, gain=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, device=None):
         super().__init__()
 
         self.core = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(4, 32, 8, stride=4, device=device)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2, device=device)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1, device=device)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            layer_init(nn.Linear(64 * 7 * 7, 512, device=device)),
             nn.ReLU(),
         )
-        self.policy = layer_init(nn.Linear(512, envs.single_action_space.n), gain=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), gain=1.0)
+        self.policy = layer_init(nn.Linear(512, envs.single_action_space.n, device=device), gain=0.01)
+        self.critic = layer_init(nn.Linear(512, 1, device=device), gain=1.0)
 
     def get_value(self, obs):
         return self.critic(self.core(obs / 255.))
@@ -275,7 +268,7 @@ def gae(next_obs, next_done, container):
     # bootstrap final step
     next_value = get_value(next_obs).flatten()
 
-    #print(container['dones'])
+    # todo : unbind ??
     b_nextnonterminals = (~container['dones']).float().unbind(0)
     b_values = container['b_old_values']
     b_values_unbind = b_values.unbind(0)
@@ -402,9 +395,9 @@ if __name__ == "__main__":
     envs = RecordEpisodeStatistics(envs)
     assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = Agent(envs).to(config.device)
+    agent = Agent(envs, device=config.device)
 
-    agent_inference = Agent(envs).to(config.device)
+    agent_inference = Agent(envs, device=config.device)
     agent_inference_params = from_module(agent).data
     agent_inference_params.to_module(agent_inference)
 
@@ -416,7 +409,7 @@ if __name__ == "__main__":
 
     if config.compile:
         policy = torch.compile(policy)
-        gae = torch.compile(gae)
+        gae = torch.compile(gae, fullgraph=True)
         update = torch.compile(update)
     
     if config.cudagraphs:
